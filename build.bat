@@ -9,11 +9,32 @@ echo =========================================
 echo Checking for virtual environment...
 if exist "venv_gpu\Scripts\activate.bat" (
     echo Activating venv_gpu...
-    call "venv_gpu\Scripts\activate.bat"
 ) else (
-    echo WARNING: venv_gpu not found. Using global Python.
+    echo venv_gpu not found. Creating venv_gpu...
+    python -m venv "venv_gpu"
+    if errorlevel 1 (
+        echo ERROR: Failed to create venv_gpu. Make sure Python is installed and on PATH.
+        echo.
+        pause
+        exit /b 1
+    )
 )
+call "venv_gpu\Scripts\activate.bat"
 echo.
+
+echo Ensuring required modules (cv2)...
+python -c "import cv2" >nul 2>&1
+if errorlevel 1 (
+    echo Installing requirements...
+    python -m pip install --upgrade pip
+    python -m pip install --extra-index-url https://download.pytorch.org/whl/cu118 -r requirements.txt
+    if errorlevel 1 (
+        echo ERROR: Failed to install requirements. Check your network and Python environment.
+        echo.
+        pause
+        exit /b 1
+    )
+)
 
 :check_cv2
 echo Checking for required modules (cv2)...
