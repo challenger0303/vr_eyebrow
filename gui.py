@@ -16,9 +16,9 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QPushButton, QCheckBox, 
                              QLineEdit, QFrame, QGroupBox, QStyleFactory, QTabWidget, 
                              QProgressBar, QFileDialog, QMessageBox, QSlider, QTableWidget, QTableWidgetItem, QHeaderView,
-                             QScrollArea, QGridLayout, QComboBox)
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor, QPainter, QPen, QBrush
+                             QScrollArea, QGridLayout, QComboBox, QTextEdit)
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
+from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor, QPainter, QPen, QBrush, QTextCursor
 from torchvision import transforms
 # Proxy imports
 import socket
@@ -146,6 +146,21 @@ class LineGraphWidget(QWidget):
         draw_bar(right_x, val_r, "Right")
 
 
+class LogEmitter(QObject):
+    message = pyqtSignal(str)
+
+
+class StreamRedirect:
+    def __init__(self, emitter):
+        self.emitter = emitter
+
+    def write(self, text):
+        if text:
+            self.emitter.message.emit(text)
+
+    def flush(self):
+        pass
+
 
 class CameraThread(QThread):
     def __init__(self, source):
@@ -238,7 +253,13 @@ class TrainingThread(QThread):
             VAL_CSV = "./data/val.csv"
             self.progress.emit("Training in progress (check terminal for logs)...")
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            save_path = f"model_{timestamp}.pth"
+            appdata = os.getenv("APPDATA")
+            if appdata:
+                model_dir = Path(appdata) / "VREyebrowTracker" / "models"
+                model_dir.mkdir(parents=True, exist_ok=True)
+                save_path = str(model_dir / f"model_{timestamp}.pth")
+            else:
+                save_path = f"model_{timestamp}.pth"
             train_model(DATA_DIR, TRAIN_CSV, VAL_CSV, save_path=save_path)
             self.progress.emit(f"Training Complete! Saved '{save_path}'.")
         except Exception as e:
@@ -417,6 +438,8 @@ class VREyebrowTrackerGUI(QMainWindow):
         # State
         self.is_dark_mode = True
         self.is_connected = False
+        self.is_connected_left = False
+        self.is_connected_right = False
         self.cam_left = None
         self.cam_right = None
         
@@ -515,9 +538,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         for i in range(max_index + 1):
             cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
             if cap is not None and cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    available.append(i)
+                available.append(i)
             if cap is not None:
                 cap.release()
         return available
@@ -666,10 +687,15 @@ class VREyebrowTrackerGUI(QMainWindow):
         
         # Top Bar (Connection)
         top_bar = QHBoxLayout()
-        self.btn_connect = QPushButton("Start Camera Streams")
-        self.btn_connect.setProperty("class", "primary-btn")
-        self.btn_connect.clicked.connect(self.toggle_connection)
-        top_bar.addWidget(self.btn_connect)
+        self.btn_connect_left = QPushButton("Start Left Stream")
+        self.btn_connect_left.setProperty("class", "primary-btn")
+        self.btn_connect_left.clicked.connect(self.toggle_left_connection)
+        top_bar.addWidget(self.btn_connect_left)
+        
+        self.btn_connect_right = QPushButton("Start Right Stream")
+        self.btn_connect_right.setProperty("class", "primary-btn")
+        self.btn_connect_right.clicked.connect(self.toggle_right_connection)
+        top_bar.addWidget(self.btn_connect_right)
         
         self.btn_theme = QPushButton("☀️ Light Mode")
         self.btn_theme.setProperty("class", "theme-btn")
@@ -682,12 +708,15 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.tabs = QTabWidget()
         self.tab_tracker = QWidget()
         self.tab_calibration = QWidget()
+        self.tab_console = QWidget()
         self.tabs.addTab(self.tab_tracker, "1. Live Tracker & OSC")
         self.tabs.addTab(self.tab_calibration, "2. Calibration & Training")
+        self.tabs.addTab(self.tab_console, "3. Console")
         main_layout.addWidget(self.tabs)
         
         self.setup_tracker_tab()
         self.setup_calibration_tab()
+        self.setup_console_tab()
         
     def setup_tracker_tab(self):
         layout = QHBoxLayout(self.tab_tracker)
@@ -1082,6 +1111,19 @@ class VREyebrowTrackerGUI(QMainWindow):
         ]
         self.calib_idx = 0
         self.calib_start_time = 0.0
+
+    def setup_console_tab(self):
+        layout = QVBoxLayout(self.tab_console)
+        self.txt_console = QTextEdit()
+        self.txt_console.setReadOnly(True)
+        layout.addWidget(self.txt_console)
+
+        self.log_emitter = LogEmitter()
+        self.log_emitter.message.connect(self._append_log)
+        self._stdout = sys.stdout
+        self._stderr = sys.stderr
+        sys.stdout = StreamRedirect(self.log_emitter)
+        sys.stderr = StreamRedirect(self.log_emitter)
         
     def snap_left_slider(self, value):
         if -15 < value < 15 and value != 0:
@@ -1245,35 +1287,50 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.update_dataset_status()
             QMessageBox.information(self, "Cleared", "Eyebrow calibration data cleared.")
 
-    def toggle_connection(self):
-        if not self.is_connected:
+    def _update_connection_state(self):
+        self.is_connected = self.is_connected_left or self.is_connected_right
+        if self.is_connected:
+            self.timer.start(10) # 100hz loop to allow 60fps pacing check to trigger precisely
+        else:
+            self.timer.stop()
+
+    def toggle_left_connection(self):
+        if not self.is_connected_left:
             left_source = self._get_camera_source(self.cmb_cam_l, self.txt_cam_l.text())
-            right_source = self._get_camera_source(self.cmb_cam_r, self.txt_cam_r.text())
             if isinstance(left_source, int) and left_source not in self.camera_devices:
                 QMessageBox.warning(self, "Camera Error", f"Left camera index {left_source} not available. Please rescan.")
                 return
+            self.cam_left = CameraThread(left_source)
+            self.cam_left.start()
+            self.is_connected_left = True
+            self.btn_connect_left.setText("Stop Left Stream")
+            self.btn_connect_left.setProperty("class", "primary-btn-danger"); self.btn_connect_left.style().unpolish(self.btn_connect_left); self.btn_connect_left.style().polish(self.btn_connect_left)
+        else:
+            self.is_connected_left = False
+            self.btn_connect_left.setText("Start Left Stream")
+            self.btn_connect_left.setProperty("class", "primary-btn"); self.btn_connect_left.style().unpolish(self.btn_connect_left); self.btn_connect_left.style().polish(self.btn_connect_left)
+            if self.cam_left: self.cam_left.stop()
+            self.left_img_label.clear()
+        self._update_connection_state()
+
+    def toggle_right_connection(self):
+        if not self.is_connected_right:
+            right_source = self._get_camera_source(self.cmb_cam_r, self.txt_cam_r.text())
             if isinstance(right_source, int) and right_source not in self.camera_devices:
                 QMessageBox.warning(self, "Camera Error", f"Right camera index {right_source} not available. Please rescan.")
                 return
-            self.cam_left = CameraThread(left_source)
             self.cam_right = CameraThread(right_source)
-            
-            self.cam_left.start()
             self.cam_right.start()
-            
-            self.is_connected = True
-            self.btn_connect.setText("Stop Camera Streams")
-            self.btn_connect.setProperty("class", "primary-btn-danger"); self.btn_connect.style().unpolish(self.btn_connect); self.btn_connect.style().polish(self.btn_connect)
-            self.timer.start(10) # 100hz loop to allow 60fps pacing check to trigger precisely
+            self.is_connected_right = True
+            self.btn_connect_right.setText("Stop Right Stream")
+            self.btn_connect_right.setProperty("class", "primary-btn-danger"); self.btn_connect_right.style().unpolish(self.btn_connect_right); self.btn_connect_right.style().polish(self.btn_connect_right)
         else:
-            self.is_connected = False
-            self.btn_connect.setText("Start Camera Streams")
-            self.btn_connect.setProperty("class", "primary-btn"); self.btn_connect.style().unpolish(self.btn_connect); self.btn_connect.style().polish(self.btn_connect)
-            self.timer.stop()
-            if self.cam_left: self.cam_left.stop()
+            self.is_connected_right = False
+            self.btn_connect_right.setText("Start Right Stream")
+            self.btn_connect_right.setProperty("class", "primary-btn"); self.btn_connect_right.style().unpolish(self.btn_connect_right); self.btn_connect_right.style().polish(self.btn_connect_right)
             if self.cam_right: self.cam_right.stop()
-            self.left_img_label.clear()
             self.right_img_label.clear()
+        self._update_connection_state()
 
     def toggle_osc(self):
         if not self.osc_enabled:
@@ -1341,8 +1398,8 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.update_dataset_status()
 
     def start_calibration_sequence(self):
-        if not self.is_connected:
-            QMessageBox.warning(self, "Warning", "Please connect to the camera streams first!")
+        if not (self.is_connected_left and self.is_connected_right):
+            QMessageBox.warning(self, "Warning", "Please connect both camera streams first!")
             return
             
         if self.cam_left is None or self.cam_right is None or getattr(self.cam_left, 'latest_frame', None) is None or getattr(self.cam_right, 'latest_frame', None) is None:
@@ -1415,16 +1472,14 @@ class VREyebrowTrackerGUI(QMainWindow):
         frame_l_bgr, frame_r_bgr = None, None
             
         if self.is_connected:
-            frame_l_bgr = getattr(self.cam_left, 'latest_frame', None)
-            frame_r_bgr = getattr(self.cam_right, 'latest_frame', None)
+            frame_l_bgr = getattr(self.cam_left, 'latest_frame', None) if self.is_connected_left else None
+            frame_r_bgr = getattr(self.cam_right, 'latest_frame', None) if self.is_connected_right else None
             
-            if frame_l_bgr is None or frame_r_bgr is None:
-                if self.tabs.currentIndex() == 0:
-                    if frame_l_bgr is None:
-                        self.left_img_label.setText("Left: No Signal")
-                    if frame_r_bgr is None:
-                        self.right_img_label.setText("Right: No Signal")
-                return
+            if self.tabs.currentIndex() == 0:
+                if self.is_connected_left and frame_l_bgr is None:
+                    self.left_img_label.setText("Left: No Signal")
+                if self.is_connected_right and frame_r_bgr is None:
+                    self.right_img_label.setText("Right: No Signal")
             
             # 60 FPS Rate Limiter (16.6 ms per frame minimum)
             if hasattr(self, 'last_render_time'):
@@ -1472,6 +1527,24 @@ class VREyebrowTrackerGUI(QMainWindow):
                     self.calib_start_time = time.time()
 
         if self.is_connected:
+            if frame_l_bgr is None or frame_r_bgr is None:
+                # Allow single-stream display, but skip inference if either side is missing
+                if self.tabs.currentIndex() == 0:
+                    if frame_l_bgr is not None:
+                        try:
+                            gray_l = cv2.cvtColor(frame_l_bgr, cv2.COLOR_BGR2GRAY)
+                            h, w = gray_l.shape
+                            self.left_img_label.setPixmap(QPixmap.fromImage(QImage(gray_l.data, w, h, w, QImage.Format_Grayscale8)).scaled(250, 250, Qt.KeepAspectRatio))
+                        except Exception:
+                            pass
+                    if frame_r_bgr is not None:
+                        try:
+                            gray_r = cv2.cvtColor(frame_r_bgr, cv2.COLOR_BGR2GRAY)
+                            h, w = gray_r.shape
+                            self.right_img_label.setPixmap(QPixmap.fromImage(QImage(gray_r.data, w, h, w, QImage.Format_Grayscale8)).scaled(250, 250, Qt.KeepAspectRatio))
+                        except Exception:
+                            pass
+                return
             # If nothing has changed natively in OpenCV, skip redundant workload
             if not is_new_frame:
                 if not self.chk_manual.isChecked():
@@ -1651,7 +1724,18 @@ class VREyebrowTrackerGUI(QMainWindow):
                 self.lbl_current_model.setText(f"{new_model_path} (Newly Trained!)")
             except: pass
 
+    def _append_log(self, text):
+        if not hasattr(self, "txt_console"):
+            return
+        self.txt_console.moveCursor(QTextCursor.End)
+        self.txt_console.insertPlainText(text)
+        self.txt_console.moveCursor(QTextCursor.End)
+
     def closeEvent(self, event):
+        if hasattr(self, "_stdout"):
+            sys.stdout = self._stdout
+        if hasattr(self, "_stderr"):
+            sys.stderr = self._stderr
         self._save_settings()
         super().closeEvent(event)
 
