@@ -13,9 +13,6 @@ build/
 dist/
 *.egg-info/
 
-# PyInstaller
-*.spec
-
 # OS/editor clutter
 .DS_Store
 Thumbs.db
