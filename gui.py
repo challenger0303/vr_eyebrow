@@ -239,6 +239,12 @@ class CameraThread(QThread):
 class TrainingThread(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(str)
+
+    def __init__(self, data_dir, train_csv, val_csv, parent=None):
+        super().__init__(parent)
+        self.data_dir = str(data_dir)
+        self.train_csv = str(train_csv)
+        self.val_csv = str(val_csv)
     
     def run(self):
         self.progress.emit("Starting PyTorch Training...")
@@ -248,9 +254,9 @@ class TrainingThread(QThread):
             importlib.reload(train)
             from train import train_model
             
-            DATA_DIR = "./data/eyebrow_images/"
-            TRAIN_CSV = "./data/train.csv"
-            VAL_CSV = "./data/val.csv"
+            DATA_DIR = self.data_dir
+            TRAIN_CSV = self.train_csv
+            VAL_CSV = self.val_csv
             self.progress.emit("Training in progress (check terminal for logs)...")
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             appdata = os.getenv("APPDATA")
@@ -1077,10 +1083,20 @@ class VREyebrowTrackerGUI(QMainWindow):
         lbl_train.setProperty("class", "header-label")
         layout.addWidget(lbl_train)
         
+        train_btn_row = QHBoxLayout()
         self.btn_train = QPushButton("BAKE MODEL (Start Training)")
+        self.btn_train.setObjectName("btn_bake_main")
         self.btn_train.setProperty("class", "primary-btn-purple")
         self.btn_train.clicked.connect(self.start_training)
-        layout.addWidget(self.btn_train)
+        train_btn_row.addWidget(self.btn_train)
+        
+        self.btn_train_with_path = QPushButton("BAKE (With Path)")
+        self.btn_train_with_path.setObjectName("btn_bake_with_path")
+        self.btn_train_with_path.setProperty("class", "primary-btn")
+        self.btn_train_with_path.clicked.connect(self.start_training_with_path)
+        train_btn_row.addWidget(self.btn_train_with_path)
+        
+        layout.addLayout(train_btn_row)
         
         self.lbl_train_status = QLabel("Status: Idle")
         layout.addWidget(self.lbl_train_status)
@@ -1178,6 +1194,8 @@ class VREyebrowTrackerGUI(QMainWindow):
         QLabel[class="muted-label"] { color: #888; font-size: 11px; }
         QLabel[class="bold-label"] { color: #ccc; font-size: 13px; font-weight: bold; }
         QLabel[class="header-label"] { color: #ddd; font-size: 14px; font-weight: bold; margin-top: 20px; }
+
+        QPushButton#btn_bake_main, QPushButton#btn_bake_with_path { padding: 15px; font-size: 14px; }
         
         QScrollArea { border: none; }
         QScrollBar:vertical { background: #1e1e1e; width: 12px; margin: 0px; }
@@ -1222,6 +1240,8 @@ class VREyebrowTrackerGUI(QMainWindow):
         QLabel[class="muted-label"] { color: #555; font-size: 11px; }
         QLabel[class="bold-label"] { color: #333; font-size: 13px; font-weight: bold; }
         QLabel[class="header-label"] { color: #222; font-size: 14px; font-weight: bold; margin-top: 20px; }
+
+        QPushButton#btn_bake_main, QPushButton#btn_bake_with_path { padding: 15px; font-size: 14px; }
         
         QScrollArea { border: none; background: transparent; }
         QScrollBar:vertical { background: #f5f5f5; width: 12px; margin: 0px; }
@@ -1706,18 +1726,50 @@ class VREyebrowTrackerGUI(QMainWindow):
         if len(self.recorded_frames) < 10:
             QMessageBox.warning(self, "Warning", "Not enough data! Please record frames first.")
             return
-            
-        self.btn_train.setEnabled(False)
-        self.thread = TrainingThread()
+
+        self._start_training(self.eyebrow_images_dir, self.csv_path, self.val_csv_path)
+
+    def start_training_with_path(self):
+        base_dir = QFileDialog.getExistingDirectory(self, "Select Dataset Folder", str(self.data_dir))
+        if not base_dir:
+            return
+        
+        base_dir = Path(base_dir)
+        data_dir = base_dir / "eyebrow_images"
+        train_csv = base_dir / "train.csv"
+        val_csv = base_dir / "val.csv"
+        
+        missing = []
+        if not data_dir.exists():
+            missing.append(str(data_dir))
+        if not train_csv.exists():
+            missing.append(str(train_csv))
+        if not val_csv.exists():
+            missing.append(str(val_csv))
+        
+        if missing:
+            msg = "Missing required dataset files/folder:\n" + "\n".join(missing)
+            QMessageBox.warning(self, "Warning", msg)
+            return
+        
+        self._start_training(data_dir, train_csv, val_csv)
+
+    def _start_training(self, data_dir, train_csv, val_csv):
+        self._set_training_buttons(False)
+        self.thread = TrainingThread(data_dir, train_csv, val_csv, parent=self)
         self.thread.progress.connect(self.update_training_status)
         self.thread.finished.connect(self.training_finished)
         self.thread.start()
+        
+    def _set_training_buttons(self, enabled):
+        self.btn_train.setEnabled(enabled)
+        self.btn_train_with_path.setEnabled(enabled)
         
     def update_training_status(self, msg):
         self.lbl_train_status.setText(f"Status: {msg}")
 
     def training_finished(self, new_model_path):
-        self.btn_train.setEnabled(True)
+        self._set_training_buttons(True)
         if new_model_path:
             try:
                 self.load_weights(new_model_path)
