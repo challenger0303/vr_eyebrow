@@ -3,6 +3,7 @@ import os
 import platform
 import winreg
 import time
+import re
 os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
 import cv2
 import torch
@@ -16,7 +17,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QPushButton, QCheckBox, 
                              QLineEdit, QFrame, QGroupBox, QStyleFactory, QTabWidget, 
                              QProgressBar, QFileDialog, QMessageBox, QSlider, QTableWidget, QTableWidgetItem, QHeaderView,
-                             QScrollArea, QGridLayout, QComboBox, QTextEdit)
+                             QScrollArea, QGridLayout, QComboBox, QTextEdit, QPlainTextEdit)
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor, QPainter, QPen, QBrush, QTextCursor
 from torchvision import transforms
@@ -494,6 +495,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.ref_pts_r = None
         self.auto_offset_l = 0.0
         self.auto_offset_r = 0.0
+        self._ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
         
         if self.csv_path.exists():
             try:
@@ -1130,8 +1132,14 @@ class VREyebrowTrackerGUI(QMainWindow):
 
     def setup_console_tab(self):
         layout = QVBoxLayout(self.tab_console)
-        self.txt_console = QTextEdit()
+        self.txt_console = QPlainTextEdit()
         self.txt_console.setReadOnly(True)
+        self.txt_console.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.txt_console.document().setMaximumBlockCount(2000)
+        self.txt_console.setObjectName("console-text")
+        mono = QFont("Consolas", 10)
+        mono.setStyleHint(QFont.Monospace)
+        self.txt_console.setFont(mono)
         layout.addWidget(self.txt_console)
 
         self.log_emitter = LogEmitter()
@@ -1201,6 +1209,14 @@ class VREyebrowTrackerGUI(QMainWindow):
         QScrollBar:vertical { background: #1e1e1e; width: 12px; margin: 0px; }
         QScrollBar::handle:vertical { background: #444; min-height: 20px; border-radius: 6px; margin: 2px;}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+        QPlainTextEdit#console-text, QTextEdit#console-text {
+            background: #101214;
+            color: #e6e6e6;
+            border: 1px solid #2b2f33;
+            border-radius: 6px;
+            padding: 8px;
+            selection-background-color: #2b4a7f;
+        }
         """
         
         light_qss = """
@@ -1247,6 +1263,14 @@ class VREyebrowTrackerGUI(QMainWindow):
         QScrollBar:vertical { background: #f5f5f5; width: 12px; margin: 0px; }
         QScrollBar::handle:vertical { background: #ccc; min-height: 20px; border-radius: 6px; margin: 2px;}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+        QPlainTextEdit#console-text, QTextEdit#console-text {
+            background: #fbfbfb;
+            color: #1a1a1a;
+            border: 1px solid #cfcfcf;
+            border-radius: 6px;
+            padding: 8px;
+            selection-background-color: #bcd6ff;
+        }
         """
         
         if self.is_dark_mode:
@@ -1779,9 +1803,32 @@ class VREyebrowTrackerGUI(QMainWindow):
     def _append_log(self, text):
         if not hasattr(self, "txt_console"):
             return
+        if not text:
+            return
+        clean = self._ansi_re.sub("", text)
+        parts = clean.split("\r")
+        for i, part in enumerate(parts):
+            if i == 0:
+                self._append_console_text(part)
+            else:
+                self._replace_console_line(part)
         self.txt_console.moveCursor(QTextCursor.End)
-        self.txt_console.insertPlainText(text)
-        self.txt_console.moveCursor(QTextCursor.End)
+
+    def _append_console_text(self, text):
+        if not text:
+            return
+        cursor = self.txt_console.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertText(text)
+        self.txt_console.setTextCursor(cursor)
+
+    def _replace_console_line(self, text):
+        cursor = self.txt_console.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.insertText(text)
+        self.txt_console.setTextCursor(cursor)
 
     def closeEvent(self, event):
         if hasattr(self, "_stdout"):
