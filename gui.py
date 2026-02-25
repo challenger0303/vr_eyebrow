@@ -249,14 +249,18 @@ class TrainingThread(QThread):
             importlib.reload(train)
             from train import train_model
             
-            DATA_DIR = "./data/eyebrow_images/"
-            TRAIN_CSV = "./data/train.csv"
-            VAL_CSV = "./data/val.csv"
-            self.progress.emit("Training in progress (check terminal for logs)...")
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
             appdata = os.getenv("APPDATA")
             if appdata:
-                model_dir = Path(appdata) / "VREyebrowTracker" / "models"
+                base_dir = Path(appdata) / "VREyebrowTracker"
+            else:
+                base_dir = Path("data")
+            DATA_DIR = str(base_dir / "eyebrow_images")
+            TRAIN_CSV = str(base_dir / "train.csv")
+            VAL_CSV = str(base_dir / "val.csv")
+            self.progress.emit("Training in progress (check terminal for logs)...")
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            if appdata:
+                model_dir = base_dir / "models"
                 model_dir.mkdir(parents=True, exist_ok=True)
                 save_path = str(model_dir / f"model_{timestamp}.pth")
             else:

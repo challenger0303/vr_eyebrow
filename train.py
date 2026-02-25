@@ -66,8 +66,6 @@ def train_model(data_dir, csv_train, csv_val, save_path=None):
             train_loss += loss.item() * images.size(0)
             
         train_loss /= len(train_loader.dataset)
-            
-        train_loss /= len(train_loader.dataset)
         
         # Validation Loop
         model.eval()
