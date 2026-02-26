@@ -240,6 +240,12 @@ class CameraThread(QThread):
 class TrainingThread(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(str)
+
+    def __init__(self, data_dir, train_csv, val_csv, parent=None):
+        super().__init__(parent)
+        self.data_dir = str(data_dir)
+        self.train_csv = str(train_csv)
+        self.val_csv = str(val_csv)
     
     def run(self):
         self.progress.emit("Starting PyTorch Training...")
@@ -248,23 +254,35 @@ class TrainingThread(QThread):
             import train
             importlib.reload(train)
             from train import train_model
-            
+
+            # start with values passed into constructor
+            DATA_DIR = self.data_dir
+            TRAIN_CSV = self.train_csv
+            VAL_CSV = self.val_csv
+            self.progress.emit("Training in progress (check terminal for logs)...")
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+            # fall back to default appdata-based paths if none provided
             appdata = os.getenv("APPDATA")
             if appdata:
                 base_dir = Path(appdata) / "VREyebrowTracker"
             else:
                 base_dir = Path("data")
-            DATA_DIR = str(base_dir / "eyebrow_images")
-            TRAIN_CSV = str(base_dir / "train.csv")
-            VAL_CSV = str(base_dir / "val.csv")
-            self.progress.emit("Training in progress (check terminal for logs)...")
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+            if not DATA_DIR:
+                DATA_DIR = str(base_dir / "eyebrow_images")
+            if not TRAIN_CSV:
+                TRAIN_CSV = str(base_dir / "train.csv")
+            if not VAL_CSV:
+                VAL_CSV = str(base_dir / "val.csv")
+
             if appdata:
                 model_dir = base_dir / "models"
                 model_dir.mkdir(parents=True, exist_ok=True)
                 save_path = str(model_dir / f"model_{timestamp}.pth")
             else:
                 save_path = f"model_{timestamp}.pth"
+
             train_model(DATA_DIR, TRAIN_CSV, VAL_CSV, save_path=save_path)
             self.progress.emit(f"Training Complete! Saved '{save_path}'.")
         except Exception as e:
@@ -493,6 +511,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.ref_pts_r = None
         self.auto_offset_l = 0.0
         self.auto_offset_r = 0.0
+        self._err_dialog_last = {}
         self._ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
         
         if self.csv_path.exists():
@@ -1083,10 +1102,20 @@ class VREyebrowTrackerGUI(QMainWindow):
         lbl_train.setProperty("class", "header-label")
         layout.addWidget(lbl_train)
         
+        train_btn_row = QHBoxLayout()
         self.btn_train = QPushButton("BAKE MODEL (Start Training)")
+        self.btn_train.setObjectName("btn_bake_main")
         self.btn_train.setProperty("class", "primary-btn-purple")
         self.btn_train.clicked.connect(self.start_training)
-        layout.addWidget(self.btn_train)
+        train_btn_row.addWidget(self.btn_train)
+        
+        self.btn_train_with_path = QPushButton("BAKE (With Path)")
+        self.btn_train_with_path.setObjectName("btn_bake_with_path")
+        self.btn_train_with_path.setProperty("class", "primary-btn")
+        self.btn_train_with_path.clicked.connect(self.start_training_with_path)
+        train_btn_row.addWidget(self.btn_train_with_path)
+        
+        layout.addLayout(train_btn_row)
         
         self.lbl_train_status = QLabel("Status: Idle")
         layout.addWidget(self.lbl_train_status)
@@ -1190,6 +1219,8 @@ class VREyebrowTrackerGUI(QMainWindow):
         QLabel[class="muted-label"] { color: #888; font-size: 11px; }
         QLabel[class="bold-label"] { color: #ccc; font-size: 13px; font-weight: bold; }
         QLabel[class="header-label"] { color: #ddd; font-size: 14px; font-weight: bold; margin-top: 20px; }
+
+        QPushButton#btn_bake_main, QPushButton#btn_bake_with_path { padding: 15px; font-size: 14px; }
         
         QScrollArea { border: none; }
         QScrollBar:vertical { background: #1e1e1e; width: 12px; margin: 0px; }
@@ -1242,6 +1273,8 @@ class VREyebrowTrackerGUI(QMainWindow):
         QLabel[class="muted-label"] { color: #555; font-size: 11px; }
         QLabel[class="bold-label"] { color: #333; font-size: 13px; font-weight: bold; }
         QLabel[class="header-label"] { color: #222; font-size: 14px; font-weight: bold; margin-top: 20px; }
+
+        QPushButton#btn_bake_main, QPushButton#btn_bake_with_path { padding: 15px; font-size: 14px; }
         
         QScrollArea { border: none; background: transparent; }
         QScrollBar:vertical { background: #f5f5f5; width: 12px; margin: 0px; }
@@ -1270,9 +1303,15 @@ class VREyebrowTrackerGUI(QMainWindow):
 
     def set_neutral_baseline(self):
         # Capture current raw EMA values to zero them out
-        self.offset_l = self.ema_left.value
-        self.offset_r = self.ema_right.value
-        QMessageBox.information(self, "Recalibrated", f"New Neutral Offsets:\nLeft: {self.offset_l:.2f}\nRight: {self.offset_r:.2f}")
+        try:
+            if self.ema_left.value is None or self.ema_right.value is None:
+                self._show_error_dialog("Warning", "No tracking data yet.\nStart the streams and wait for values before setting baseline.")
+                return
+            self.offset_l = self.ema_left.value
+            self.offset_r = self.ema_right.value
+            QMessageBox.information(self, "Recalibrated", f"New Neutral Offsets:\nLeft: {self.offset_l:.2f}\nRight: {self.offset_r:.2f}")
+        except Exception as e:
+            self._show_error_dialog("Error", f"Failed to set baseline:\n{e}")
 
     def update_dataset_status(self):
         self.lbl_dataset_status.setText(f"  |  Current Saved Dataset: {len(self.recorded_frames)} images")
@@ -1308,12 +1347,27 @@ class VREyebrowTrackerGUI(QMainWindow):
     def clear_calibration_data(self):
         if QMessageBox.question(self, "Confirm", "Are you sure you want to delete all collected Eyebrow calibration images and CSVs?", QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
             self.recorded_frames.clear()
-            if self.csv_path.exists(): self.csv_path.unlink()
-            if self.val_csv_path.exists(): self.val_csv_path.unlink()
+            errors = []
+            try:
+                if self.csv_path.exists(): self.csv_path.unlink()
+            except Exception as e:
+                errors.append(f"{self.csv_path}: {e}")
+            try:
+                if self.val_csv_path.exists(): self.val_csv_path.unlink()
+            except Exception as e:
+                errors.append(f"{self.val_csv_path}: {e}")
             for f in self.eyebrow_images_dir.rglob("*.jpg"):
-                f.unlink()
+                try:
+                    f.unlink()
+                except Exception as e:
+                    errors.append(f"{f}: {e}")
             self.update_dataset_status()
             QMessageBox.information(self, "Cleared", "Eyebrow calibration data cleared.")
+            if errors:
+                msg = "Some files could not be deleted:\n" + "\n".join(errors[:10])
+                if len(errors) > 10:
+                    msg += f"\n...and {len(errors) - 10} more."
+                self._show_error_dialog("Warning", msg)
 
     def _update_connection_state(self):
         self.is_connected = self.is_connected_left or self.is_connected_right
@@ -1363,14 +1417,21 @@ class VREyebrowTrackerGUI(QMainWindow):
     def toggle_osc(self):
         if not self.osc_enabled:
             # Connect
-            ip = self.txt_ip.text()
-            port = int(self.txt_port.text())
+            ip = self.txt_ip.text().strip()
+            try:
+                port = int(self.txt_port.text())
+                if port < 1 or port > 65535:
+                    raise ValueError("Port must be between 1 and 65535.")
+            except Exception as e:
+                self._show_error_dialog("OSC Error", f"Invalid port:\n{e}")
+                return
             try:
                 self.osc_client = SimpleUDPClient(ip, port)
                 
                 self.osc_enabled = True
                 self.btn_osc.setText("Stop OSC Sender")
-                self.btn_osc.setProperty("class", "danger-btn"); self.btn_osc.style().unpolish(self.btn_osc); self.btn_osc.style().polish(self.btn_osc)
+                self.btn_osc.setProperty("class", "danger-btn")
+                self._refresh_button_style(self.btn_osc)
                 self.txt_ip.setEnabled(False)
                 self.txt_port.setEnabled(False)
             except Exception as e:
@@ -1382,6 +1443,7 @@ class VREyebrowTrackerGUI(QMainWindow):
             
             self.btn_osc.setText("Start OSC Sender")
             self.btn_osc.setProperty("class", "success-btn")
+            self._refresh_button_style(self.btn_osc)
             self.txt_ip.setEnabled(True)
             self.txt_port.setEnabled(True)
 
@@ -1398,32 +1460,35 @@ class VREyebrowTrackerGUI(QMainWindow):
                 QMessageBox.critical(self, "Error", "Failed to load weights. Incompatible model architecture.")
                 
     def save_calibration_frame(self, target_val, label_str, frame_l, frame_r):
-        uid = int(time.time() * 1000)
-        gray_l = cv2.cvtColor(frame_l, cv2.COLOR_BGR2GRAY)
-        gray_r = cv2.cvtColor(frame_r, cv2.COLOR_BGR2GRAY)
-        
-        folder_dir = self.eyebrow_images_dir / label_str
-        folder_dir.mkdir(parents=True, exist_ok=True)
-        
-        name_l = f"{label_str}/{label_str}_l_{uid}.jpg"
-        cv2.imwrite(str(self.eyebrow_images_dir / name_l), gray_l)
-        self.recorded_frames.append({"filename": name_l, "label": target_val})
-        
-        name_r = f"{label_str}/{label_str}_r_{uid}.jpg"
-        cv2.imwrite(str(self.eyebrow_images_dir / name_r), cv2.flip(gray_r, 1))
-        self.recorded_frames.append({"filename": name_r, "label": target_val})
-        
-        try: limit = int(self.txt_dataset_limit.text())
-        except: limit = 15000
-        
-        was_pruned = self.prune_dataset(self.recorded_frames, self.eyebrow_images_dir, lambda r: r['label'], limit)
-        
-        df = pd.DataFrame(self.recorded_frames)
-        df = df.sample(frac=1).reset_index(drop=True)
-        train_size = int(len(df) * 0.8)
-        df.iloc[:train_size].to_csv(self.csv_path, index=False)
-        df.iloc[train_size:].to_csv(self.val_csv_path, index=False)
-        self.update_dataset_status()
+        try:
+            uid = int(time.time() * 1000)
+            gray_l = cv2.cvtColor(frame_l, cv2.COLOR_BGR2GRAY)
+            gray_r = cv2.cvtColor(frame_r, cv2.COLOR_BGR2GRAY)
+            
+            folder_dir = self.eyebrow_images_dir / label_str
+            folder_dir.mkdir(parents=True, exist_ok=True)
+            
+            name_l = f"{label_str}/{label_str}_l_{uid}.jpg"
+            cv2.imwrite(str(self.eyebrow_images_dir / name_l), gray_l)
+            self.recorded_frames.append({"filename": name_l, "label": target_val})
+            
+            name_r = f"{label_str}/{label_str}_r_{uid}.jpg"
+            cv2.imwrite(str(self.eyebrow_images_dir / name_r), cv2.flip(gray_r, 1))
+            self.recorded_frames.append({"filename": name_r, "label": target_val})
+            
+            try: limit = int(self.txt_dataset_limit.text())
+            except: limit = 15000
+            
+            was_pruned = self.prune_dataset(self.recorded_frames, self.eyebrow_images_dir, lambda r: r['label'], limit)
+            
+            df = pd.DataFrame(self.recorded_frames)
+            df = df.sample(frac=1).reset_index(drop=True)
+            train_size = int(len(df) * 0.8)
+            df.iloc[:train_size].to_csv(self.csv_path, index=False)
+            df.iloc[train_size:].to_csv(self.val_csv_path, index=False)
+            self.update_dataset_status()
+        except Exception as e:
+            self._show_error_dialog("Capture Error", f"Failed to save calibration frame:\n{e}", key="save_frame")
 
     def start_calibration_sequence(self):
         if not (self.is_connected_left and self.is_connected_right):
@@ -1621,86 +1686,92 @@ class VREyebrowTrackerGUI(QMainWindow):
                 out_r = self.slider_r.value() / 100.0
                 lbl_suffix = " (MANUAL)"
             elif self.is_connected and tensor_l is not None and tensor_r is not None:
-                import torch.nn.functional as F
-                
-                # Perform all crops/flips natively on the NVIDIA GPU!
-                h_l, w_l = tensor_l.shape[1], tensor_l.shape[2]
-                
-                crop_l = tensor_l[:, :int(h_l*0.4), int(w_l*0.15):int(w_l*0.85)]
-                crop_r = torch.flip(tensor_r, dims=[2])[:, :int(h_l*0.4), int(w_l*0.15):int(w_l*0.85)]
-                
-                from torchvision.transforms import functional as TF
-                
-                # Hardware bilinear interpolation with anti-aliasing to precisely match PIL training features
-                crop_l = TF.resize(crop_l, size=[64, 64], interpolation=TF.InterpolationMode.BILINEAR, antialias=True).unsqueeze(0).float()
-                crop_r = TF.resize(crop_r, size=[64, 64], interpolation=TF.InterpolationMode.BILINEAR, antialias=True).unsqueeze(0).float()
-                
-                # Normalize [0-255] natively to [-1.0, 1.0] for PyTorch and ensure hardware dispatch
-                batch = (torch.cat([crop_l, crop_r], dim=0) / 127.5 - 1.0).to(self.device)
-                
-                with torch.no_grad():
-                    # Eyebrow Regressor (now outputs 1 value per eye)
-                    outputs = torch.clamp(self.model(batch), -1.0, 1.0)
-                    if outputs.shape == (2, 1) or outputs.shape == (2, 5): # Backward compat 
-                        raw_l = outputs[0][0].item() if outputs.shape == (2,5) else outputs[0].item()
-                        raw_r = outputs[1][0].item() if outputs.shape == (2,5) else outputs[1].item()
-                    else: raw_l, raw_r = 0.0, 0.0
+                try:
+                    import torch.nn.functional as F
+                    
+                    # Perform all crops/flips natively on the NVIDIA GPU!
+                    h_l, w_l = tensor_l.shape[1], tensor_l.shape[2]
+                    
+                    crop_l = tensor_l[:, :int(h_l*0.4), int(w_l*0.15):int(w_l*0.85)]
+                    crop_r = torch.flip(tensor_r, dims=[2])[:, :int(h_l*0.4), int(w_l*0.15):int(w_l*0.85)]
+                    
+                    from torchvision.transforms import functional as TF
+                    
+                    # Hardware bilinear interpolation with anti-aliasing to precisely match PIL training features
+                    crop_l = TF.resize(crop_l, size=[64, 64], interpolation=TF.InterpolationMode.BILINEAR, antialias=True).unsqueeze(0).float()
+                    crop_r = TF.resize(crop_r, size=[64, 64], interpolation=TF.InterpolationMode.BILINEAR, antialias=True).unsqueeze(0).float()
+                    
+                    # Normalize [0-255] natively to [-1.0, 1.0] for PyTorch and ensure hardware dispatch
+                    batch = (torch.cat([crop_l, crop_r], dim=0) / 127.5 - 1.0).to(self.device)
+                    
+                    with torch.no_grad():
+                        # Eyebrow Regressor (now outputs 1 value per eye)
+                        outputs = torch.clamp(self.model(batch), -1.0, 1.0)
+                        if outputs.shape == (2, 1) or outputs.shape == (2, 5): # Backward compat 
+                            raw_l = outputs[0][0].item() if outputs.shape == (2,5) else outputs[0].item()
+                            raw_r = outputs[1][0].item() if outputs.shape == (2,5) else outputs[1].item()
+                        else: raw_l, raw_r = 0.0, 0.0
+                                
+                    # --- AUTO BASELINE CORRECTION LOGIC (1D Statistical Variance) ---
+                    self.brow_history_l.append(raw_l)
+                    self.brow_history_r.append(raw_r)
+                    if len(self.brow_history_l) > 60: self.brow_history_l.pop(0)
+                    if len(self.brow_history_r) > 60: self.brow_history_r.pop(0)
+                    
+                    if self.chk_auto_baseline.isChecked() and len(self.brow_history_l) == 60:
+                        import statistics
+                        var_l = statistics.variance(self.brow_history_l)
+                        var_r = statistics.variance(self.brow_history_r)
+                        
+                        VAR_THRESHOLD = 0.0005
+                        T_MAX = (self.slider_alpha.value() / 100.0) * 0.1 # Map 0-100 slider to 0.0-0.10 max lerp
+                        
+                        var_max = max(var_l, var_r)
+                        
+                        if var_max < VAR_THRESHOLD:
+                            stability = 1.0 - (var_max / VAR_THRESHOLD)
+                            stability = max(0.0, min(1.0, stability))
+                            t = T_MAX * (stability ** 2)
                             
-                # --- AUTO BASELINE CORRECTION LOGIC (1D Statistical Variance) ---
-                self.brow_history_l.append(raw_l)
-                self.brow_history_r.append(raw_r)
-                if len(self.brow_history_l) > 60: self.brow_history_l.pop(0)
-                if len(self.brow_history_r) > 60: self.brow_history_r.pop(0)
-                
-                if self.chk_auto_baseline.isChecked() and len(self.brow_history_l) == 60:
-                    import statistics
-                    var_l = statistics.variance(self.brow_history_l)
-                    var_r = statistics.variance(self.brow_history_r)
+                            # The new baseline is simply the mean of the stable 1-second window
+                            new_baseline_l = sum(self.brow_history_l) / 60.0
+                            new_baseline_r = sum(self.brow_history_r) / 60.0
+                            
+                            lerp = lambda a, b, t: a + (b - a) * t
+                            
+                            # Use lerp to slowly pull the auto_offset towards the new resting baseline 
+                            self.auto_offset_l = lerp(self.auto_offset_l, new_baseline_l, t)
+                            self.auto_offset_r = lerp(self.auto_offset_r, new_baseline_r, t)
+                            
+                            self.lbl_auto_status.setText(f"Status: Locked onto resting baseline (var={var_max:.5f})")
+                            self.lbl_auto_status.setStyleSheet("color: #4CAF50;")
+                        else:
+                            t = 0.0
+                            self.lbl_auto_status.setText(f"Status: Tracking expressions (var={var_max:.5f})")
+                            self.lbl_auto_status.setStyleSheet("color: #eb9534;")
+                            
+                        # Apply corrective offset 
+                        raw_l -= self.auto_offset_l
+                        raw_r -= self.auto_offset_r
                     
-                    VAR_THRESHOLD = 0.0005
-                    T_MAX = (self.slider_alpha.value() / 100.0) * 0.1 # Map 0-100 slider to 0.0-0.10 max lerp
+                    # Apply standard Static Offsets and EMA Filter
+                    alpha = max(0.01, 1.0 - (self.slider_smooth.value() / 100.0))
+                    self.ema_left.alpha = alpha
+                    self.ema_right.alpha = alpha
                     
-                    var_max = max(var_l, var_r)
+                    out_l = self.ema_left.update(raw_l) - self.offset_l
+                    out_r = self.ema_right.update(raw_r) - self.offset_r
                     
-                    if var_max < VAR_THRESHOLD:
-                        stability = 1.0 - (var_max / VAR_THRESHOLD)
-                        stability = max(0.0, min(1.0, stability))
-                        t = T_MAX * (stability ** 2)
-                        
-                        # The new baseline is simply the mean of the stable 1-second window
-                        new_baseline_l = sum(self.brow_history_l) / 60.0
-                        new_baseline_r = sum(self.brow_history_r) / 60.0
-                        
-                        lerp = lambda a, b, t: a + (b - a) * t
-                        
-                        # Use lerp to slowly pull the auto_offset towards the new resting baseline 
-                        self.auto_offset_l = lerp(self.auto_offset_l, new_baseline_l, t)
-                        self.auto_offset_r = lerp(self.auto_offset_r, new_baseline_r, t)
-                        
-                        self.lbl_auto_status.setText(f"Status: Locked onto resting baseline (var={var_max:.5f})")
-                        self.lbl_auto_status.setStyleSheet("color: #4CAF50;")
-                    else:
-                        t = 0.0
-                        self.lbl_auto_status.setText(f"Status: Tracking expressions (var={var_max:.5f})")
-                        self.lbl_auto_status.setStyleSheet("color: #eb9534;")
-                        
-                    # Apply corrective offset 
-                    raw_l -= self.auto_offset_l
-                    raw_r -= self.auto_offset_r
-                
-                # Apply standard Static Offsets and EMA Filter
-                alpha = max(0.01, 1.0 - (self.slider_smooth.value() / 100.0))
-                self.ema_left.alpha = alpha
-                self.ema_right.alpha = alpha
-                
-                out_l = self.ema_left.update(raw_l) - self.offset_l
-                out_r = self.ema_right.update(raw_r) - self.offset_r
-                
-                # Clamp to domain mapping
-                out_l = max(min(out_l, 1.0), -1.0)
-                out_r = max(min(out_r, 1.0), -1.0)
-                
-                lbl_suffix = ""
+                    # Clamp to domain mapping
+                    out_l = max(min(out_l, 1.0), -1.0)
+                    out_r = max(min(out_r, 1.0), -1.0)
+                    
+                    lbl_suffix = ""
+                except Exception as e:
+                    self._show_error_dialog("Inference Error", f"Inference failed:\n{e}", key="inference")
+                    out_l = 0.0
+                    out_r = 0.0
+                    lbl_suffix = " (ERROR)"
             else:
                 out_l = 0.0
                 out_r = 0.0
@@ -1726,26 +1797,81 @@ class VREyebrowTrackerGUI(QMainWindow):
                 
             # Broadcast OSC if enabled
             if self.osc_enabled and self.osc_client:
-                # Eyebrows
-                self.osc_client.send_message("/avatar/parameters/FT/v2/BrowExpressionLeft", float(out_l))
-                self.osc_client.send_message("/avatar/parameters/FT/v2/BrowExpressionRight", float(out_r))
+                try:
+                    # Eyebrows
+                    self.osc_client.send_message("/avatar/parameters/FT/v2/BrowExpressionLeft", float(out_l))
+                    self.osc_client.send_message("/avatar/parameters/FT/v2/BrowExpressionRight", float(out_r))
+                except Exception as e:
+                    self._show_error_dialog("OSC Error", f"Failed to send OSC:\n{e}", key="osc_send")
+                    self.osc_enabled = False
+                    self.osc_client = None
+                    self.btn_osc.setText("Start OSC Sender")
+                    self.btn_osc.setProperty("class", "success-btn"); self.btn_osc.style().unpolish(self.btn_osc); self.btn_osc.style().polish(self.btn_osc)
+                    self.txt_ip.setEnabled(True)
+                    self.txt_port.setEnabled(True)
 
     def start_training(self):
         if len(self.recorded_frames) < 10:
             QMessageBox.warning(self, "Warning", "Not enough data! Please record frames first.")
             return
-            
-        self.btn_train.setEnabled(False)
-        self.thread = TrainingThread()
+
+        self._start_training(self.eyebrow_images_dir, self.csv_path, self.val_csv_path)
+
+    def start_training_with_path(self):
+        base_dir = QFileDialog.getExistingDirectory(self, "Select Dataset Folder", str(self.data_dir))
+        if not base_dir:
+            return
+        
+        base_dir = Path(base_dir)
+        data_dir = base_dir / "eyebrow_images"
+        train_csv = base_dir / "train.csv"
+        val_csv = base_dir / "val.csv"
+        
+        missing = []
+        if not data_dir.exists():
+            missing.append(str(data_dir))
+        if not train_csv.exists():
+            missing.append(str(train_csv))
+        if not val_csv.exists():
+            missing.append(str(val_csv))
+        
+        if missing:
+            msg = "Missing required dataset files/folder:\n" + "\n".join(missing)
+            QMessageBox.warning(self, "Warning", msg)
+            return
+        
+        self._start_training(data_dir, train_csv, val_csv)
+
+    def _start_training(self, data_dir, train_csv, val_csv):
+        self._set_training_buttons(False)
+        self.thread = TrainingThread(data_dir, train_csv, val_csv, parent=self)
         self.thread.progress.connect(self.update_training_status)
         self.thread.finished.connect(self.training_finished)
         self.thread.start()
+        
+    def _set_training_buttons(self, enabled):
+        self.btn_train.setEnabled(enabled)
+        self.btn_train_with_path.setEnabled(enabled)
+
+    def _refresh_button_style(self, btn):
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+
+    def _show_error_dialog(self, title, message, key=None, interval=3.0):
+        if key is None:
+            QMessageBox.warning(self, title, message)
+            return
+        now = time.time()
+        last_time = self._err_dialog_last.get(key, 0.0)
+        if now - last_time >= interval:
+            QMessageBox.warning(self, title, message)
+            self._err_dialog_last[key] = now
         
     def update_training_status(self, msg):
         self.lbl_train_status.setText(f"Status: {msg}")
 
     def training_finished(self, new_model_path):
-        self.btn_train.setEnabled(True)
+        self._set_training_buttons(True)
         if new_model_path:
             try:
                 self.load_weights(new_model_path)
