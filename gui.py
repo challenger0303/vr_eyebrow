@@ -283,8 +283,12 @@ class TrainingThread(QThread):
             else:
                 save_path = f"model_{timestamp}.pth"
 
-            train_model(DATA_DIR, TRAIN_CSV, VAL_CSV, save_path=save_path)
-            self.progress.emit(f"Training Complete! Saved '{save_path}'.")
+            ok = train_model(DATA_DIR, TRAIN_CSV, VAL_CSV, save_path=save_path)
+            if ok:
+                self.progress.emit(f"Training Complete! Saved '{save_path}'.")
+            else:
+                self.progress.emit("Error: Training failed. Check dataset paths and logs.")
+                save_path = ""
         except Exception as e:
             self.progress.emit(f"Error: {str(e)}")
             save_path = ""

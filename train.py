@@ -34,7 +34,10 @@ def train_model(data_dir, csv_train, csv_val, save_path=None):
     except FileNotFoundError:
         print(f"Error: Could not find datasets at {csv_train} or {csv_val}.")
         print("Please create dummy datasets or point to real data to run training.")
-        return
+        return False
+    except Exception as e:
+        print(f"Error: Failed to initialize datasets: {e}")
+        return False
 
     # Initialize Model, Loss, and Optimizer
     model = TinyBrowNet().to(device)
@@ -93,6 +96,7 @@ def train_model(data_dir, csv_train, csv_val, save_path=None):
             if epochs_no_improve >= PATIENCE:
                 print(f"Early stopping triggered after {epoch+1} epochs.")
                 break
+    return True
 
 if __name__ == "__main__":
     # Ensure dataset paths exist or prompt user
