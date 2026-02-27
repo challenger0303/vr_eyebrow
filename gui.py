@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QPushButton, QCheckBox, 
                              QLineEdit, QFrame, QGroupBox, QStyleFactory, QTabWidget, 
                              QProgressBar, QFileDialog, QMessageBox, QSlider, QTableWidget, QTableWidgetItem, QHeaderView,
-                             QScrollArea, QGridLayout, QComboBox, QTextEdit, QPlainTextEdit)
+                             QScrollArea, QGridLayout, QComboBox, QTextEdit, QPlainTextEdit, QStackedLayout, QSizePolicy)
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor, QPainter, QPen, QBrush, QTextCursor
 from torchvision import transforms
@@ -95,8 +95,8 @@ class EyeVisualizer(QWidget):
 class LineGraphWidget(QWidget):
     def __init__(self, parent=None, max_points=120):
         super().__init__(parent)
-        self.setMinimumHeight(90)
-        self.setMaximumHeight(110)
+        self.setMinimumHeight(70)
+        self.setMaximumHeight(90)
         self.max_points = max_points
         self.series_l = []
         self.series_r = []
@@ -146,6 +146,80 @@ class LineGraphWidget(QWidget):
         draw_bar(left_x, val_l, "Left")
         draw_bar(right_x, val_r, "Right")
 
+
+class ParamBarGraphWidget(QWidget):
+    def __init__(self, parent=None, show_labels=True, show_values=False, show_bars=True):
+        super().__init__(parent)
+        self.items = []
+        self.show_labels = show_labels
+        self.show_values = show_values
+        self.show_bars = show_bars
+        self.setMinimumHeight(120)
+
+    def set_data(self, items):
+        self.items = list(items)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w = self.width()
+        h = self.height()
+
+        bg = self.palette().base().color()
+        painter.fillRect(0, 0, w, h, bg)
+
+        if not self.items:
+            painter.setPen(QPen(self.palette().text().color(), 1))
+            painter.drawText(8, 20, "No OSC parameters")
+            return
+
+        left_margin = 10
+        right_margin = 10
+        top_margin = 8
+        bottom_margin = 26 if self.show_labels else 8
+        bar_area_w = max(10, w - left_margin - right_margin)
+        bar_area_h = max(10, h - top_margin - bottom_margin)
+        center_y = top_margin + bar_area_h / 2
+        count = len(self.items)
+        col_w = max(10, int(bar_area_w / max(1, count)))
+
+        if self.show_bars:
+            grid_pen = QPen(QColor(120, 120, 120), 1)
+            painter.setPen(grid_pen)
+            painter.drawLine(left_margin, int(center_y), w - right_margin, int(center_y))
+
+        text_pen = QPen(self.palette().text().color(), 1)
+        for i, (name, value) in enumerate(self.items):
+            x = left_margin + i * col_w
+            bar_w = max(6, int(col_w * 0.5))
+            x_bar = x + (col_w - bar_w) // 2
+
+            v = max(-1.0, min(1.0, float(value)))
+            half_h = bar_area_h / 2
+            bar_len = abs(v) * half_h
+            if v >= 0:
+                y0 = center_y - bar_len
+                y1 = center_y
+                color = QColor(76, 175, 80)
+            else:
+                y0 = center_y
+                y1 = center_y + bar_len
+                color = QColor(244, 67, 54)
+            if self.show_bars:
+                painter.setBrush(QBrush(color))
+                painter.setPen(QPen(QColor(40, 40, 40), 1))
+                painter.drawRoundedRect(int(x_bar), int(y0), int(bar_w), int(max(1, y1 - y0)), 3, 3)
+
+            if self.show_labels:
+                painter.setPen(text_pen)
+                label = str(name)
+                painter.drawText(int(x), int(h - 12), int(col_w), 16, Qt.AlignCenter, label)
+
+            if self.show_values:
+                painter.setPen(text_pen)
+                val_text = f"{v:+.2f}"
+                painter.drawText(int(x), int(center_y) - 8, int(col_w), 16, Qt.AlignCenter, val_text)
 
 class LogEmitter(QObject):
     message = pyqtSignal(str)
@@ -233,19 +307,54 @@ class CameraThread(QThread):
             if self.cap is not None:
                 self.cap.release()
 
-    def stop(self):
+    def stop(self, wait_ms=0):
         self.running = False
-        self.wait()
+        try:
+            if self.cap is not None:
+                self.cap.release()
+        except Exception:
+            pass
+        if wait_ms and wait_ms > 0:
+            # Avoid UI freeze if OpenCV read blocks
+            if not self.wait(wait_ms):
+                try:
+                    self.terminate()
+                except Exception:
+                    pass
+                self.wait(200)
+
+
+class CameraScanThread(QThread):
+    result = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, max_index=4, parent=None):
+        super().__init__(parent)
+        self.max_index = max_index
+
+    def run(self):
+        try:
+            available = []
+            for i in range(self.max_index + 1):
+                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                if cap is not None and cap.isOpened():
+                    available.append(i)
+                if cap is not None:
+                    cap.release()
+            self.result.emit(available)
+        except Exception as e:
+            self.error.emit(str(e))
 
 class TrainingThread(QThread):
     progress = pyqtSignal(str)
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(object)
 
-    def __init__(self, data_dir, train_csv, val_csv, parent=None):
+    def __init__(self, data_dir, train_csv, val_csv, use_lr_models=False, parent=None):
         super().__init__(parent)
         self.data_dir = str(data_dir)
         self.train_csv = str(train_csv)
         self.val_csv = str(val_csv)
+        self.use_lr_models = use_lr_models
     
     def run(self):
         self.progress.emit("Starting PyTorch Training...")
@@ -253,7 +362,7 @@ class TrainingThread(QThread):
             import importlib
             import train
             importlib.reload(train)
-            from train import train_model
+            from train import train_model, train_model_pair
 
             # start with values passed into constructor
             DATA_DIR = self.data_dir
@@ -276,19 +385,27 @@ class TrainingThread(QThread):
             if not VAL_CSV:
                 VAL_CSV = str(base_dir / "val.csv")
 
-            if appdata:
-                model_dir = base_dir / "models"
-                model_dir.mkdir(parents=True, exist_ok=True)
-                save_path = str(model_dir / f"model_{timestamp}.pth")
-            else:
-                save_path = f"model_{timestamp}.pth"
+            model_dir = base_dir / "models"
+            model_dir.mkdir(parents=True, exist_ok=True)
 
-            ok = train_model(DATA_DIR, TRAIN_CSV, VAL_CSV, save_path=save_path)
-            if ok:
-                self.progress.emit(f"Training Complete! Saved '{save_path}'.")
+            if self.use_lr_models:
+                save_left = str(model_dir / f"model_left_{timestamp}.pth")
+                save_right = str(model_dir / f"model_right_{timestamp}.pth")
+                ok = train_model_pair(DATA_DIR, TRAIN_CSV, VAL_CSV, save_left=save_left, save_right=save_right)
+                if ok:
+                    self.progress.emit(f"Training Complete! Saved '{save_left}' and '{save_right}'.")
+                    save_path = (save_left, save_right)
+                else:
+                    self.progress.emit("Error: Training failed. Check dataset paths and logs.")
+                    save_path = ""
             else:
-                self.progress.emit("Error: Training failed. Check dataset paths and logs.")
-                save_path = ""
+                save_path = str(model_dir / f"model_{timestamp}.pth")
+                ok = train_model(DATA_DIR, TRAIN_CSV, VAL_CSV, save_path=save_path)
+                if ok:
+                    self.progress.emit(f"Training Complete! Saved '{save_path}'.")
+                else:
+                    self.progress.emit("Error: Training failed. Check dataset paths and logs.")
+                    save_path = ""
         except Exception as e:
             self.progress.emit(f"Error: {str(e)}")
             save_path = ""
@@ -480,11 +597,20 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.available_devices = self._get_available_devices()
         self.device = self.available_devices[0][1]
         self.model = TinyBrowNet().to(self.device)
+        self.model_left = TinyBrowNet().to(self.device)
+        self.model_right = TinyBrowNet().to(self.device)
+        self.use_lr_models = False
         self.current_model_path = "None Loaded"
+        self.current_model_left_path = ""
+        self.current_model_right_path = ""
             
         self.transform = setup_transform()
         self.ema_left = EMARegressor(alpha=0.3)
         self.ema_right = EMARegressor(alpha=0.3)
+        self.ema_inner_left = EMARegressor(alpha=0.3)
+        self.ema_inner_right = EMARegressor(alpha=0.3)
+        self.ema_outer_left = EMARegressor(alpha=0.3)
+        self.ema_outer_right = EMARegressor(alpha=0.3)
         
         self.offset_l = 0.0
         self.offset_r = 0.0
@@ -504,7 +630,8 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.eyebrow_images_dir = self.data_dir / "eyebrow_images"
         self.csv_path = self.data_dir / "train.csv"
         self.val_csv_path = self.data_dir / "val.csv"
-        self.camera_devices = self._scan_cameras()
+        self.camera_devices = []
+        self._camera_scan_thread = None
         
         # Auto-Baseline State
         self.brow_history_l = []
@@ -517,10 +644,35 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.auto_offset_r = 0.0
         self._err_dialog_last = {}
         self._ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+        self.osc_debug_enabled = False
+        self.osc_param_order = [
+            "BrowExpressionLeft",
+            "BrowExpressionRight",
+            "BrowInnerUpLeft",
+            "BrowInnerUpRight",
+            "BrowOuterUpLeft",
+            "BrowOuterUpRight",
+        ]
+        self.osc_param_values = {k: 0.0 for k in self.osc_param_order}
+        self.osc_param_labels = {
+            "BrowExpressionLeft": "BrowL",
+            "BrowExpressionRight": "BrowR",
+            "BrowInnerUpLeft": "InnerL",
+            "BrowInnerUpRight": "InnerR",
+            "BrowOuterUpLeft": "OuterL",
+            "BrowOuterUpRight": "OuterR",
+        }
+        self.osc_param_enabled = {k: True for k in self.osc_param_order}
         
         if self.csv_path.exists():
             try:
                 records = pd.read_csv(self.csv_path).to_dict('records')
+                # Backward-compat: upgrade legacy "label" to brow/inner/outer
+                for r in records:
+                    if "brow" not in r and "label" in r:
+                        r["brow"] = r["label"]
+                        r["inner"] = r["label"]
+                        r["outer"] = r["label"]
                 self.recorded_frames = [r for r in records if (self.eyebrow_images_dir / r['filename']).exists()]
                 
                 # Auto-heal: If missing files were removed, rebuild the CSVs safely
@@ -541,6 +693,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.apply_theme()
         self.update_dataset_status()
         self.apply_settings()
+        QTimer.singleShot(200, self.scan_cameras)
 
     def _get_available_devices(self):
         devices = []
@@ -609,7 +762,17 @@ class VREyebrowTrackerGUI(QMainWindow):
         if self.is_connected:
             QMessageBox.information(self, "Camera Scan", "Stop streams before rescanning devices.")
             return
-        self.camera_devices = self._scan_cameras()
+        if self._camera_scan_thread and self._camera_scan_thread.isRunning():
+            return
+        self.btn_scan_cam.setEnabled(False)
+        self.btn_scan_cam.setText("Scanning...")
+        self._camera_scan_thread = CameraScanThread(parent=self)
+        self._camera_scan_thread.result.connect(self._apply_camera_scan)
+        self._camera_scan_thread.error.connect(self._handle_camera_scan_error)
+        self._camera_scan_thread.start()
+
+    def _apply_camera_scan(self, devices):
+        self.camera_devices = list(devices)
         left_sel = self.cmb_cam_l.currentData()
         right_sel = self.cmb_cam_r.currentData()
         
@@ -632,6 +795,14 @@ class VREyebrowTrackerGUI(QMainWindow):
         self._set_camera_combo(self.cmb_cam_l, left_sel)
         self._set_camera_combo(self.cmb_cam_r, right_sel)
 
+        self.btn_scan_cam.setEnabled(True)
+        self.btn_scan_cam.setText("Scan Cams")
+
+    def _handle_camera_scan_error(self, message):
+        self.btn_scan_cam.setEnabled(True)
+        self.btn_scan_cam.setText("Scan Cams")
+        self._show_error_dialog("Camera Scan Error", f"Failed to scan cameras:\n{message}", key="cam_scan", interval=3.0)
+
     def apply_settings(self):
         s = self.settings
         if "cam_left" in s:
@@ -650,6 +821,28 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.slider_smooth.setValue(int(s["smooth"]))
         if "sync" in s:
             self.slider_sync.setValue(int(s["sync"]))
+        if "deadzone" in s:
+            self.slider_deadzone.setValue(int(s["deadzone"]))
+        if "boost" in s:
+            self.slider_boost_pos.setValue(int(s["boost"]))
+            self.slider_boost_neg.setValue(int(s["boost"]))
+        if "boost_pos" in s:
+            self.slider_boost_pos.setValue(int(s["boost_pos"]))
+        if "boost_neg" in s:
+            self.slider_boost_neg.setValue(int(s["boost_neg"]))
+        for k in self.osc_param_order:
+            dz_key = f"deadzone_{k}"
+            boost_pos_key = f"boost_pos_{k}"
+            boost_neg_key = f"boost_neg_{k}"
+            enable_key = f"osc_enable_{k}"
+            if dz_key in s and k in self.param_deadzone_sliders:
+                self.param_deadzone_sliders[k].setValue(int(s[dz_key]))
+            if boost_pos_key in s and k in self.param_boost_pos_sliders:
+                self.param_boost_pos_sliders[k].setValue(int(s[boost_pos_key]))
+            if boost_neg_key in s and k in self.param_boost_neg_sliders:
+                self.param_boost_neg_sliders[k].setValue(int(s[boost_neg_key]))
+            if enable_key in s and k in self.osc_param_toggles:
+                self.osc_param_toggles[k].setChecked(bool(s[enable_key]))
         if "auto_baseline" in s:
             self.chk_auto_baseline.setChecked(bool(s["auto_baseline"]))
         if "alpha" in s:
@@ -658,11 +851,20 @@ class VREyebrowTrackerGUI(QMainWindow):
             idx = s["device_index"]
             if 0 <= idx < self.cmb_device.count():
                 self.cmb_device.setCurrentIndex(idx)
+        if "use_lr_models" in s:
+            self.use_lr_models = bool(s["use_lr_models"])
+            if hasattr(self, "chk_lr_models"):
+                self.chk_lr_models.setChecked(self.use_lr_models)
         if "last_model_path" in s:
             path = s["last_model_path"]
             if path and os.path.exists(path):
                 self.load_weights(path)
                 self.lbl_current_model.setText(os.path.basename(path))
+        if "last_model_left_path" in s and "last_model_right_path" in s:
+            lpath = s.get("last_model_left_path")
+            rpath = s.get("last_model_right_path")
+            if lpath and rpath and os.path.exists(lpath) and os.path.exists(rpath):
+                self.load_weights_lr(lpath, rpath)
 
     def on_device_changed(self, idx):
         if idx < 0 or idx >= len(self.available_devices):
@@ -674,39 +876,57 @@ class VREyebrowTrackerGUI(QMainWindow):
         self._update_setting("device_index", idx)
         try:
             self.model.to(self.device)
+            self.model_left.to(self.device)
+            self.model_right.to(self.device)
         except Exception as e:
             QMessageBox.warning(self, "Device Error", f"Failed to switch to {label}:\n{e}")
             self.device = torch.device("cpu")
             self.model.to(self.device)
+            self.model_left.to(self.device)
+            self.model_right.to(self.device)
             cpu_idx = next((i for i, (lbl, _d) in enumerate(self.available_devices) if lbl.startswith("CPU")), None)
             if cpu_idx is not None:
                 self.cmb_device.setCurrentIndex(cpu_idx)
         
+    def _load_state_dict_compat(self, model, state_dict):
+        current_dict = model.state_dict()
+        if 'fc2.weight' in state_dict and 'fc2.weight' in current_dict:
+            out_old = state_dict['fc2.weight'].shape[0]
+            out_new = current_dict['fc2.weight'].shape[0]
+            if out_old != out_new:
+                new_fc2_weight = current_dict['fc2.weight'].clone()
+                new_fc2_bias = current_dict['fc2.bias'].clone()
+                copy_n = min(out_old, out_new)
+                new_fc2_weight[:copy_n, :] = state_dict['fc2.weight'][:copy_n, :]
+                new_fc2_bias[:copy_n] = state_dict['fc2.bias'][:copy_n]
+                state_dict['fc2.weight'] = new_fc2_weight
+                state_dict['fc2.bias'] = new_fc2_bias
+        model.load_state_dict(state_dict)
+        model.eval()
+
     def load_weights(self, path):
         try:
             state_dict = torch.load(path, map_location=self.device)
-            current_dict = self.model.state_dict()
-            
-            # Backward compatibility check for older 1-output `TinyBrowNet` models
-            if 'fc2.weight' in state_dict and current_dict['fc2.weight'].shape[0] == 5:
-                if state_dict['fc2.weight'].shape[0] == 1:
-                    print(f"Loading legacy 1-output model into 5-output architecture...")
-                    new_fc2_weight = current_dict['fc2.weight'].clone()
-                    new_fc2_bias = current_dict['fc2.bias'].clone()
-                    
-                    # Copy the brow prediction weights to index 0. The other 4 (landmarks) remain random.
-                    new_fc2_weight[0:1, :] = state_dict['fc2.weight']
-                    new_fc2_bias[0:1] = state_dict['fc2.bias']
-                    
-                    state_dict['fc2.weight'] = new_fc2_weight
-                    state_dict['fc2.bias'] = new_fc2_bias
-                    
-            self.model.load_state_dict(state_dict)
-            self.model.eval()
+            self._load_state_dict_compat(self.model, state_dict)
             self.current_model_path = path
             return True
         except Exception as e:
             print(f"Error loading weights: {e}")
+            return False
+
+    def load_weights_lr(self, left_path, right_path):
+        try:
+            state_left = torch.load(left_path, map_location=self.device)
+            state_right = torch.load(right_path, map_location=self.device)
+            self._load_state_dict_compat(self.model_left, state_left)
+            self._load_state_dict_compat(self.model_right, state_right)
+            self.current_model_left_path = left_path
+            self.current_model_right_path = right_path
+            self._update_setting("last_model_left_path", left_path)
+            self._update_setting("last_model_right_path", right_path)
+            return True
+        except Exception as e:
+            print(f"Error loading L/R weights: {e}")
             return False
 
     def init_ui(self):
@@ -783,7 +1003,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         cam_l_row.addWidget(self.btn_scan_cam)
         
         self.left_img_label = QLabel("Left Eye Stream")
-        self.left_img_label.setFixedSize(250, 250)
+        self.left_img_label.setFixedSize(220, 220)
         self.left_img_label.setProperty("class", "cam-label")
         self.left_img_label.setAlignment(Qt.AlignCenter)
         
@@ -822,7 +1042,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         cam_r_row.addWidget(self.cmb_cam_r)
         
         self.right_img_label = QLabel("Right Eye Stream")
-        self.right_img_label.setFixedSize(250, 250)
+        self.right_img_label.setFixedSize(220, 220)
         self.right_img_label.setProperty("class", "cam-label")
         self.right_img_label.setAlignment(Qt.AlignCenter)
         
@@ -843,13 +1063,132 @@ class VREyebrowTrackerGUI(QMainWindow):
         cam_row.addLayout(self.right_eye_box)
         eye_layout.addLayout(cam_row)
         
+        # Manual Override Group (debug-only container)
+        grp_manual = QGroupBox("Manual Browser Override")
+        grp_manual_layout = QVBoxLayout()
+        
+        # Manual Override
+        self.chk_manual = QCheckBox("Manual Override (Testing)")
+        grp_manual_layout.addWidget(self.chk_manual) # Keep this for the main checkbox
+        
+        slider_layout = QHBoxLayout()
+        
+        # Left Slider
+        vbox_l = QVBoxLayout()
+        vbox_l.addWidget(QLabel("Left"))
+        self.slider_l = QSlider(Qt.Horizontal)
+        self.slider_l.setRange(-100, 100)
+        self.slider_l.setValue(0)
+        self.slider_l.setTickPosition(QSlider.TicksBelow)
+        self.slider_l.valueChanged.connect(self.snap_left_slider)
+        vbox_l.addWidget(self.slider_l, alignment=Qt.AlignHCenter)
+        slider_layout.addLayout(vbox_l)
+        
+        # Right Slider
+        vbox_r = QVBoxLayout()
+        vbox_r.addWidget(QLabel("Right"))
+        self.slider_r = QSlider(Qt.Horizontal)
+        self.slider_r.setRange(-100, 100)
+        self.slider_r.setValue(0)
+        self.slider_r.setTickPosition(QSlider.TicksBelow)
+        self.slider_r.valueChanged.connect(self.snap_right_slider)
+        vbox_r.addWidget(self.slider_r, alignment=Qt.AlignHCenter)
+        slider_layout.addLayout(vbox_r)
+        
+        grp_manual_layout.addLayout(slider_layout)
+        
+        grp_manual.setLayout(grp_manual_layout)
+
         # Inference Graph
-        grp_graph = QGroupBox("Inference Graph")
+        self.grp_graph = QGroupBox("Inference Graph")
         graph_layout = QVBoxLayout()
         self.graph_widget = LineGraphWidget()
         graph_layout.addWidget(self.graph_widget)
-        grp_graph.setLayout(graph_layout)
-        eye_layout.addWidget(grp_graph)
+        self.grp_graph.setLayout(graph_layout)
+
+        # OSC Debug Widget (debug page)
+        self.osc_debug_widget = ParamBarGraphWidget()
+        self.osc_debug_widget.set_data([(self.osc_param_labels.get(k, k), 0.0) for k in self.osc_param_order])
+        self.values_row_widget = ParamBarGraphWidget(show_labels=False, show_values=True, show_bars=False)
+        self.values_row_widget.setMinimumHeight(24)
+        self.values_row_widget.set_data([(self.osc_param_labels.get(k, k), 0.0) for k in self.osc_param_order])
+
+        # OSC enable toggles (per-parameter)
+        self.osc_param_toggles = {}
+        toggles_row = QWidget()
+        toggles_layout = QHBoxLayout(toggles_row)
+        toggles_layout.setContentsMargins(0, 0, 0, 0)
+        for k in self.osc_param_order:
+            chk = QCheckBox("")
+            chk.setChecked(True)
+            chk.setToolTip(f"OSC Enable: {self.osc_param_labels.get(k, k)}")
+            chk.stateChanged.connect(lambda state, key=k: self._toggle_param_osc(key, state))
+            chk.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.osc_param_toggles[k] = chk
+            toggles_layout.addWidget(chk)
+
+        # Per-Parameter Tuning (Debug)
+        self.param_deadzone_sliders = {}
+        self.param_boost_pos_sliders = {}
+        self.param_boost_neg_sliders = {}
+        self.param_group = QGroupBox("Per-Parameter Tuning (Debug)")
+        param_layout = QGridLayout()
+        param_layout.addWidget(QLabel("Param"), 0, 0)
+        param_layout.addWidget(QLabel("Deadzone"), 0, 1)
+        param_layout.addWidget(QLabel("Boost +"), 0, 2)
+        param_layout.addWidget(QLabel("Boost -"), 0, 3)
+        row = 1
+        for k in self.osc_param_order:
+            label = QLabel(self.osc_param_labels.get(k, k))
+            dz = QSlider(Qt.Horizontal)
+            dz.setRange(0, 30)
+            dz.setValue(5)
+            dz.valueChanged.connect(lambda v, key=k: self._update_setting(f"deadzone_{key}", v))
+            boost_pos = QSlider(Qt.Horizontal)
+            boost_pos.setRange(50, 300)
+            boost_pos.setValue(100)
+            boost_pos.valueChanged.connect(lambda v, key=k: self._update_setting(f"boost_pos_{key}", v))
+            boost_neg = QSlider(Qt.Horizontal)
+            boost_neg.setRange(50, 300)
+            boost_neg.setValue(100)
+            boost_neg.valueChanged.connect(lambda v, key=k: self._update_setting(f"boost_neg_{key}", v))
+            self.param_deadzone_sliders[k] = dz
+            self.param_boost_pos_sliders[k] = boost_pos
+            self.param_boost_neg_sliders[k] = boost_neg
+            param_layout.addWidget(label, row, 0)
+            param_layout.addWidget(dz, row, 1)
+            param_layout.addWidget(boost_pos, row, 2)
+            param_layout.addWidget(boost_neg, row, 3)
+            row += 1
+        self.param_group.setLayout(param_layout)
+
+        debug_page = QWidget()
+        debug_page_layout = QVBoxLayout(debug_page)
+        debug_page_layout.addWidget(self.osc_debug_widget)
+        debug_page_layout.addWidget(self.values_row_widget)
+        debug_page_layout.addWidget(toggles_row)
+        debug_page_layout.addWidget(self.param_group)
+        # Manual Override (debug only)
+        debug_page_layout.addWidget(grp_manual)
+        debug_page_layout.addStretch(1)
+
+        self.graph_stack = QStackedLayout()
+        self.graph_stack.addWidget(self.grp_graph)
+        self.graph_stack.addWidget(debug_page)
+        graph_stack_widget = QWidget()
+        graph_stack_widget.setLayout(self.graph_stack)
+        eye_layout.addWidget(graph_stack_widget)
+
+        # Debug Toggle (small, bottom-left)
+        eye_layout.addStretch(1)
+        debug_row = QHBoxLayout()
+        self.chk_osc_debug = QCheckBox("Debug")
+        self.chk_osc_debug.setProperty("class", "tiny-check")
+        self.chk_osc_debug.setChecked(False)
+        self.chk_osc_debug.stateChanged.connect(self._toggle_osc_debug)
+        debug_row.addWidget(self.chk_osc_debug)
+        debug_row.addStretch(1)
+        eye_layout.addLayout(debug_row)
         
         layout.addLayout(eye_layout, stretch=2)
         
@@ -882,6 +1221,12 @@ class VREyebrowTrackerGUI(QMainWindow):
         btn_load_model = QPushButton("Load Eyebrow Weights (.pth)")
         btn_load_model.clicked.connect(self.browse_weights)
         grp_model_layout.addWidget(btn_load_model)
+
+        self.chk_lr_models = QCheckBox("Beta: Separate L/R Models")
+        self.chk_lr_models.setChecked(False)
+        self.chk_lr_models.stateChanged.connect(self._toggle_lr_models)
+        self.chk_lr_models.stateChanged.connect(lambda v: self._update_setting("use_lr_models", v == Qt.Checked))
+        grp_model_layout.addWidget(self.chk_lr_models)
         
         self.lbl_current_model = QLabel("Eyebrow: None Loaded")
         self.lbl_current_model.setProperty("class", "muted-label")
@@ -894,7 +1239,12 @@ class VREyebrowTrackerGUI(QMainWindow):
         grp_osc = QGroupBox("OSC Output & Filter Proxy")
         grp_osc_layout = QVBoxLayout()
         
-        lbl_osc_instr = QLabel("AI Output Parameters:\n/avatar/parameters/FT/v2/BrowExpression...")
+        lbl_osc_instr = QLabel(
+            "AI Output Parameters:\n"
+            "/avatar/parameters/FT/v2/BrowExpression...\n"
+            "/avatar/parameters/FT/v2/BrowInnerUp...\n"
+            "/avatar/parameters/FT/v2/BrowOuterUp..."
+        )
         lbl_osc_instr.setProperty("class", "muted-label")
         grp_osc_layout.addWidget(lbl_osc_instr)
         
@@ -919,66 +1269,55 @@ class VREyebrowTrackerGUI(QMainWindow):
         grp_osc.setLayout(grp_osc_layout)
         settings_panel.addWidget(grp_osc)
         
-        # Manual Override Group
-        grp_manual = QGroupBox("Manual Browser Override")
-        grp_manual_layout = QVBoxLayout()
-        
-        # Manual Override
-        man_layout = QHBoxLayout()
-        self.chk_manual = QCheckBox("Manual Override (Testing)")
-        grp_manual_layout.addWidget(self.chk_manual) # Keep this for the main checkbox
-        
-        slider_layout = QHBoxLayout()
-        
-        # Left Slider
-        vbox_l = QVBoxLayout()
-        vbox_l.addWidget(QLabel("Left"))
-        self.slider_l = QSlider(Qt.Vertical)
-        self.slider_l.setRange(-100, 100)
-        self.slider_l.setValue(0)
-        self.slider_l.setTickPosition(QSlider.TicksBothSides)
-        self.slider_l.valueChanged.connect(self.snap_left_slider)
-        vbox_l.addWidget(self.slider_l, alignment=Qt.AlignHCenter)
-        slider_layout.addLayout(vbox_l)
-        
-        # Right Slider
-        vbox_r = QVBoxLayout()
-        vbox_r.addWidget(QLabel("Right"))
-        self.slider_r = QSlider(Qt.Vertical)
-        self.slider_r.setRange(-100, 100)
-        self.slider_r.setValue(0)
-        self.slider_r.setTickPosition(QSlider.TicksBothSides)
-        self.slider_r.valueChanged.connect(self.snap_right_slider)
-        vbox_r.addWidget(self.slider_r, alignment=Qt.AlignHCenter)
-        slider_layout.addLayout(vbox_r)
-        
-        grp_manual_layout.addLayout(slider_layout)
-        
-        # Quick Calibration
-        self.btn_set_neutral = QPushButton("Set Neutral Baseline (Offset)")
-        self.btn_set_neutral.setToolTip("Click while neutral to fix tracking if the headset shifted.")
-        self.btn_set_neutral.clicked.connect(self.set_neutral_baseline)
-        grp_manual_layout.addWidget(self.btn_set_neutral)
-        
-        grp_manual.setLayout(grp_manual_layout)
-        settings_panel.addWidget(grp_manual)
-        
         # Smoothing Group
         grp_smooth = QGroupBox("Signal Smoothing")
         grp_smooth_layout = QVBoxLayout()
-        self.lbl_smooth_val = QLabel("Smooth Intensity: 70%")
+        self.lbl_smooth_val = QLabel("Smooth Intensity: 50%")
         grp_smooth_layout.addWidget(self.lbl_smooth_val)
         
         self.slider_smooth = QSlider(Qt.Horizontal)
         self.slider_smooth.setRange(0, 99)
-        self.slider_smooth.setValue(70)
+        self.slider_smooth.setValue(50)
         self.slider_smooth.valueChanged.connect(lambda v: self.lbl_smooth_val.setText(f"Smooth Intensity: {v}%"))
         self.slider_smooth.valueChanged.connect(lambda v: self._update_setting("smooth", v))
         grp_smooth_layout.addWidget(self.slider_smooth)
         
         grp_smooth.setLayout(grp_smooth_layout)
         settings_panel.addWidget(grp_smooth)
-        
+
+        # Response Tuning Group
+        grp_tune = QGroupBox("Response Tuning")
+        grp_tune_layout = QVBoxLayout()
+        self.lbl_deadzone = QLabel("Deadzone: 5%")
+        grp_tune_layout.addWidget(self.lbl_deadzone)
+        self.slider_deadzone = QSlider(Qt.Horizontal)
+        self.slider_deadzone.setRange(0, 30)
+        self.slider_deadzone.setValue(5)
+        self.slider_deadzone.valueChanged.connect(lambda v: self.lbl_deadzone.setText(f"Deadzone: {v}%"))
+        self.slider_deadzone.valueChanged.connect(lambda v: self._update_setting("deadzone", v))
+        grp_tune_layout.addWidget(self.slider_deadzone)
+
+        self.lbl_boost_pos = QLabel("Boost +: 100%")
+        grp_tune_layout.addWidget(self.lbl_boost_pos)
+        self.slider_boost_pos = QSlider(Qt.Horizontal)
+        self.slider_boost_pos.setRange(50, 300)
+        self.slider_boost_pos.setValue(100)
+        self.slider_boost_pos.valueChanged.connect(lambda v: self.lbl_boost_pos.setText(f"Boost +: {v}%"))
+        self.slider_boost_pos.valueChanged.connect(lambda v: self._update_setting("boost_pos", v))
+        grp_tune_layout.addWidget(self.slider_boost_pos)
+
+        self.lbl_boost_neg = QLabel("Boost -: 100%")
+        grp_tune_layout.addWidget(self.lbl_boost_neg)
+        self.slider_boost_neg = QSlider(Qt.Horizontal)
+        self.slider_boost_neg.setRange(50, 300)
+        self.slider_boost_neg.setValue(100)
+        self.slider_boost_neg.valueChanged.connect(lambda v: self.lbl_boost_neg.setText(f"Boost -: {v}%"))
+        self.slider_boost_neg.valueChanged.connect(lambda v: self._update_setting("boost_neg", v))
+        grp_tune_layout.addWidget(self.slider_boost_neg)
+
+        grp_tune.setLayout(grp_tune_layout)
+        settings_panel.addWidget(grp_tune)
+
         # Sync Group
         grp_sync = QGroupBox("L/R Synchronization")
         grp_sync_layout =QVBoxLayout()
@@ -1017,12 +1356,21 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.slider_alpha.setValue(5) # Default 5% alpha
         self.slider_alpha.valueChanged.connect(lambda v: self._update_setting("alpha", v))
         auto_sliders.addWidget(self.slider_alpha)
+
+        self.btn_set_neutral = QPushButton("Set Neutral Baseline (Offset)")
+        self.btn_set_neutral.setToolTip("Click while neutral to fix tracking if the headset shifted.")
+        self.btn_set_neutral.clicked.connect(self.set_neutral_baseline)
+        self.btn_reset_offsets = QPushButton("Reset Offsets (Zero)")
+        self.btn_reset_offsets.setToolTip("Force offsets to 0.0 for both eyes.")
+        self.btn_reset_offsets.clicked.connect(self.reset_offsets_zero)
         
         self.lbl_auto_status = QLabel("Status: Waiting for stable neutral frame...")
         self.lbl_auto_status.setStyleSheet("color: #888;")
         
         auto_layout.addLayout(auto_controls)
         auto_layout.addLayout(auto_sliders)
+        auto_layout.addWidget(self.btn_set_neutral)
+        auto_layout.addWidget(self.btn_reset_offsets)
         auto_layout.addWidget(self.lbl_auto_status)
         auto_group.setLayout(auto_layout)
         settings_panel.addWidget(auto_group)
@@ -1223,6 +1571,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         QLabel[class="muted-label"] { color: #888; font-size: 11px; }
         QLabel[class="bold-label"] { color: #ccc; font-size: 13px; font-weight: bold; }
         QLabel[class="header-label"] { color: #ddd; font-size: 14px; font-weight: bold; margin-top: 20px; }
+        QCheckBox[class="tiny-check"] { font-size: 11px; padding: 2px 4px; }
 
         QPushButton#btn_bake_main, QPushButton#btn_bake_with_path { padding: 15px; font-size: 14px; }
         
@@ -1277,6 +1626,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         QLabel[class="muted-label"] { color: #555; font-size: 11px; }
         QLabel[class="bold-label"] { color: #333; font-size: 13px; font-weight: bold; }
         QLabel[class="header-label"] { color: #222; font-size: 14px; font-weight: bold; margin-top: 20px; }
+        QCheckBox[class="tiny-check"] { font-size: 11px; padding: 2px 4px; }
 
         QPushButton#btn_bake_main, QPushButton#btn_bake_with_path { padding: 15px; font-size: 14px; }
         
@@ -1316,6 +1666,16 @@ class VREyebrowTrackerGUI(QMainWindow):
             QMessageBox.information(self, "Recalibrated", f"New Neutral Offsets:\nLeft: {self.offset_l:.2f}\nRight: {self.offset_r:.2f}")
         except Exception as e:
             self._show_error_dialog("Error", f"Failed to set baseline:\n{e}")
+
+    def reset_offsets_zero(self):
+        self.offset_l = 0.0
+        self.offset_r = 0.0
+        self.auto_offset_l = 0.0
+        self.auto_offset_r = 0.0
+        self.brow_history_l.clear()
+        self.brow_history_r.clear()
+        self.lbl_auto_status.setText("Status: Offsets reset to 0.0")
+        self.lbl_auto_status.setStyleSheet("color: #888;")
 
     def update_dataset_status(self):
         self.lbl_dataset_status.setText(f"  |  Current Saved Dataset: {len(self.recorded_frames)} images")
@@ -1397,6 +1757,7 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.btn_connect_left.setProperty("class", "primary-btn"); self.btn_connect_left.style().unpolish(self.btn_connect_left); self.btn_connect_left.style().polish(self.btn_connect_left)
             if self.cam_left: self.cam_left.stop()
             self.left_img_label.clear()
+            self.left_img_label.setText("Left Eye Stream")
         self._update_connection_state()
 
     def toggle_right_connection(self):
@@ -1416,6 +1777,7 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.btn_connect_right.setProperty("class", "primary-btn"); self.btn_connect_right.style().unpolish(self.btn_connect_right); self.btn_connect_right.style().polish(self.btn_connect_right)
             if self.cam_right: self.cam_right.stop()
             self.right_img_label.clear()
+            self.right_img_label.setText("Right Eye Stream")
         self._update_connection_state()
 
     def toggle_osc(self):
@@ -1453,16 +1815,54 @@ class VREyebrowTrackerGUI(QMainWindow):
 
     def browse_weights(self):
         options = QFileDialog.Options()
-        file_name, _ = QFileDialog.getOpenFileName(self, "Select Eyebrow Weights", "", "PyTorch Models (*.pth *.pt);;All Files (*)", options=options)
-        if file_name:
-            success = self.load_weights(file_name)
-            if success:
-                self.lbl_current_model.setText(os.path.basename(file_name))
-                self._update_setting("last_model_path", file_name)
-                QMessageBox.information(self, "Success", "Eyebrow weights loaded successfully.")
+        if self.use_lr_models:
+            appdata = os.getenv("APPDATA")
+            if appdata:
+                start_dir = str(Path(appdata) / "VREyebrowTracker" / "models")
             else:
-                QMessageBox.critical(self, "Error", "Failed to load weights. Incompatible model architecture.")
+                start_dir = ""
+            left_path, _ = QFileDialog.getOpenFileName(self, "Select LEFT Eyebrow Weights", start_dir, "PyTorch Models (*.pth *.pt);;All Files (*)", options=options)
+            if not left_path:
+                return
+            right_path, _ = QFileDialog.getOpenFileName(self, "Select RIGHT Eyebrow Weights", start_dir, "PyTorch Models (*.pth *.pt);;All Files (*)", options=options)
+            if not right_path:
+                return
+            success = self.load_weights_lr(left_path, right_path)
+            if success:
+                self.lbl_current_model.setText(f"L/R Loaded: {os.path.basename(left_path)} | {os.path.basename(right_path)}")
+                QMessageBox.information(self, "Success", "L/R eyebrow weights loaded successfully.")
+            else:
+                QMessageBox.critical(self, "Error", "Failed to load L/R weights.")
+        else:
+            appdata = os.getenv("APPDATA")
+            if appdata:
+                start_dir = str(Path(appdata) / "VREyebrowTracker" / "models")
+            else:
+                start_dir = ""
+            file_name, _ = QFileDialog.getOpenFileName(self, "Select Eyebrow Weights", start_dir, "PyTorch Models (*.pth *.pt);;All Files (*)", options=options)
+            if file_name:
+                success = self.load_weights(file_name)
+                if success:
+                    self.lbl_current_model.setText(os.path.basename(file_name))
+                    self._update_setting("last_model_path", file_name)
+                    QMessageBox.information(self, "Success", "Eyebrow weights loaded successfully.")
+                else:
+                    QMessageBox.critical(self, "Error", "Failed to load weights. Incompatible model architecture.")
                 
+    def _map_folder_to_targets(self, folder, default_brow=0.0):
+        name = (folder or "").lower()
+        if "surprised" in name:
+            return 1.0, 1.0, 1.0
+        if "frown" in name:
+            return -1.0, -1.0, 0.0
+        if "sad_inner" in name:
+            return 0.5, 1.0, 0.0
+        if "smile_outer" in name:
+            return -0.5, 0.0, -1.0
+        if "neutral" in name:
+            return 0.0, 0.0, 0.0
+        return float(default_brow), 0.0, 0.0
+
     def save_calibration_frame(self, target_val, label_str, frame_l, frame_r):
         try:
             uid = int(time.time() * 1000)
@@ -1472,18 +1872,20 @@ class VREyebrowTrackerGUI(QMainWindow):
             folder_dir = self.eyebrow_images_dir / label_str
             folder_dir.mkdir(parents=True, exist_ok=True)
             
+            brow_t, inner_t, outer_t = self._map_folder_to_targets(label_str, target_val)
+
             name_l = f"{label_str}/{label_str}_l_{uid}.jpg"
             cv2.imwrite(str(self.eyebrow_images_dir / name_l), gray_l)
-            self.recorded_frames.append({"filename": name_l, "label": target_val})
+            self.recorded_frames.append({"filename": name_l, "brow": brow_t, "inner": inner_t, "outer": outer_t})
             
             name_r = f"{label_str}/{label_str}_r_{uid}.jpg"
             cv2.imwrite(str(self.eyebrow_images_dir / name_r), cv2.flip(gray_r, 1))
-            self.recorded_frames.append({"filename": name_r, "label": target_val})
+            self.recorded_frames.append({"filename": name_r, "brow": brow_t, "inner": inner_t, "outer": outer_t})
             
             try: limit = int(self.txt_dataset_limit.text())
             except: limit = 15000
             
-            was_pruned = self.prune_dataset(self.recorded_frames, self.eyebrow_images_dir, lambda r: r['label'], limit)
+            was_pruned = self.prune_dataset(self.recorded_frames, self.eyebrow_images_dir, lambda r: r.get('brow', r.get('label', 0.0)), limit)
             
             df = pd.DataFrame(self.recorded_frames)
             df = df.sample(frac=1).reset_index(drop=True)
@@ -1688,6 +2090,10 @@ class VREyebrowTrackerGUI(QMainWindow):
                 # Read from UI sliders (-100 to 100 -> -1.0 to 1.0)
                 out_l = self.slider_l.value() / 100.0
                 out_r = self.slider_r.value() / 100.0
+                inner_l = out_l
+                inner_r = out_r
+                outer_l = out_l
+                outer_r = out_r
                 lbl_suffix = " (MANUAL)"
             elif self.is_connected and tensor_l is not None and tensor_r is not None:
                 try:
@@ -1709,16 +2115,37 @@ class VREyebrowTrackerGUI(QMainWindow):
                     batch = (torch.cat([crop_l, crop_r], dim=0) / 127.5 - 1.0).to(self.device)
                     
                     with torch.no_grad():
-                        # Eyebrow Regressor (now outputs 1 value per eye)
-                        outputs = torch.clamp(self.model(batch), -1.0, 1.0)
-                        if outputs.shape == (2, 1) or outputs.shape == (2, 5): # Backward compat 
-                            raw_l = outputs[0][0].item() if outputs.shape == (2,5) else outputs[0].item()
-                            raw_r = outputs[1][0].item() if outputs.shape == (2,5) else outputs[1].item()
-                        else: raw_l, raw_r = 0.0, 0.0
+                        # Eyebrow Regressor
+                        if self.use_lr_models:
+                            out_l_t = torch.clamp(self.model_left(batch[0:1]), -1.0, 1.0)
+                            out_r_t = torch.clamp(self.model_right(batch[1:2]), -1.0, 1.0)
+                        else:
+                            out_all = torch.clamp(self.model(batch), -1.0, 1.0)
+                            out_l_t = out_all[0:1]
+                            out_r_t = out_all[1:2]
+
+                        # Outputs are [brow, inner, outer]
+                        if out_l_t.dim() >= 2 and out_l_t.shape[1] >= 3:
+                            raw_brow_l = out_l_t[0][0].item()
+                            raw_inner_l = out_l_t[0][1].item()
+                            raw_outer_l = out_l_t[0][2].item()
+                        else:
+                            raw_brow_l = out_l_t[0][0].item() if out_l_t.numel() > 0 else 0.0
+                            raw_inner_l = raw_brow_l
+                            raw_outer_l = raw_brow_l
+
+                        if out_r_t.dim() >= 2 and out_r_t.shape[1] >= 3:
+                            raw_brow_r = out_r_t[0][0].item()
+                            raw_inner_r = out_r_t[0][1].item()
+                            raw_outer_r = out_r_t[0][2].item()
+                        else:
+                            raw_brow_r = out_r_t[0][0].item() if out_r_t.numel() > 0 else 0.0
+                            raw_inner_r = raw_brow_r
+                            raw_outer_r = raw_brow_r
                                 
                     # --- AUTO BASELINE CORRECTION LOGIC (1D Statistical Variance) ---
-                    self.brow_history_l.append(raw_l)
-                    self.brow_history_r.append(raw_r)
+                    self.brow_history_l.append(raw_brow_l)
+                    self.brow_history_r.append(raw_brow_r)
                     if len(self.brow_history_l) > 60: self.brow_history_l.pop(0)
                     if len(self.brow_history_r) > 60: self.brow_history_r.pop(0)
                     
@@ -1755,30 +2182,51 @@ class VREyebrowTrackerGUI(QMainWindow):
                             self.lbl_auto_status.setStyleSheet("color: #eb9534;")
                             
                         # Apply corrective offset 
-                        raw_l -= self.auto_offset_l
-                        raw_r -= self.auto_offset_r
+                        raw_brow_l -= self.auto_offset_l
+                        raw_brow_r -= self.auto_offset_r
                     
                     # Apply standard Static Offsets and EMA Filter
                     alpha = max(0.01, 1.0 - (self.slider_smooth.value() / 100.0))
                     self.ema_left.alpha = alpha
                     self.ema_right.alpha = alpha
+                    self.ema_inner_left.alpha = alpha
+                    self.ema_inner_right.alpha = alpha
+                    self.ema_outer_left.alpha = alpha
+                    self.ema_outer_right.alpha = alpha
                     
-                    out_l = self.ema_left.update(raw_l) - self.offset_l
-                    out_r = self.ema_right.update(raw_r) - self.offset_r
+                    out_l = self.ema_left.update(raw_brow_l) - self.offset_l
+                    out_r = self.ema_right.update(raw_brow_r) - self.offset_r
+
+                    inner_l = self.ema_inner_left.update(raw_inner_l)
+                    inner_r = self.ema_inner_right.update(raw_inner_r)
+                    outer_l = self.ema_outer_left.update(raw_outer_l)
+                    outer_r = self.ema_outer_right.update(raw_outer_r)
                     
                     # Clamp to domain mapping
                     out_l = max(min(out_l, 1.0), -1.0)
                     out_r = max(min(out_r, 1.0), -1.0)
+                    inner_l = max(min(inner_l, 1.0), -1.0)
+                    inner_r = max(min(inner_r, 1.0), -1.0)
+                    outer_l = max(min(outer_l, 1.0), -1.0)
+                    outer_r = max(min(outer_r, 1.0), -1.0)
                     
                     lbl_suffix = ""
                 except Exception as e:
                     self._show_error_dialog("Inference Error", f"Inference failed:\n{e}", key="inference")
                     out_l = 0.0
                     out_r = 0.0
+                    inner_l = 0.0
+                    inner_r = 0.0
+                    outer_l = 0.0
+                    outer_r = 0.0
                     lbl_suffix = " (ERROR)"
             else:
                 out_l = 0.0
                 out_r = 0.0
+                inner_l = 0.0
+                inner_r = 0.0
+                outer_l = 0.0
+                outer_r = 0.0
                 lbl_suffix = ""
                 
             # Apply Synchronization Blending
@@ -1787,6 +2235,14 @@ class VREyebrowTrackerGUI(QMainWindow):
                 avg_val = (out_l + out_r) / 2.0
                 out_l = out_l * (1.0 - sync_factor) + (avg_val * sync_factor)
                 out_r = out_r * (1.0 - sync_factor) + (avg_val * sync_factor)
+            
+            # Apply deadzone + boost (per-parameter)
+            out_l = self._apply_deadzone_boost_param(out_l, "BrowExpressionLeft")
+            out_r = self._apply_deadzone_boost_param(out_r, "BrowExpressionRight")
+            inner_l = self._apply_deadzone_boost_param(inner_l, "BrowInnerUpLeft")
+            inner_r = self._apply_deadzone_boost_param(inner_r, "BrowInnerUpRight")
+            outer_l = self._apply_deadzone_boost_param(outer_l, "BrowOuterUpLeft")
+            outer_r = self._apply_deadzone_boost_param(outer_r, "BrowOuterUpRight")
 
             if self.tabs.currentIndex() == 0:
                 self.graph_history_l.append(out_l)
@@ -1798,13 +2254,23 @@ class VREyebrowTrackerGUI(QMainWindow):
             if self.tabs.currentIndex() == 0:
                 self.lbl_l_brow.setText(f"Brow Slider: {out_l:.2f}{lbl_suffix}")
                 self.lbl_r_brow.setText(f"Brow Slider: {out_r:.2f}{lbl_suffix}")
-                
+
+            osc_values = self._compute_osc_values(out_l, out_r, inner_l, inner_r, outer_l, outer_r)
+            self.osc_param_values.update(osc_values)
+
+            if self.osc_debug_enabled and hasattr(self, "osc_debug_widget"):
+                ordered = [(self.osc_param_labels.get(k, k), self.osc_param_values.get(k, 0.0)) for k in self.osc_param_order]
+                self.osc_debug_widget.set_data(ordered)
+                if hasattr(self, "values_row_widget"):
+                    ordered_vals = [(self.osc_param_labels.get(k, k), self.osc_param_values.get(k, 0.0)) for k in self.osc_param_order]
+                    self.values_row_widget.set_data(ordered_vals)
+
             # Broadcast OSC if enabled
             if self.osc_enabled and self.osc_client:
                 try:
-                    # Eyebrows
-                    self.osc_client.send_message("/avatar/parameters/FT/v2/BrowExpressionLeft", float(out_l))
-                    self.osc_client.send_message("/avatar/parameters/FT/v2/BrowExpressionRight", float(out_r))
+                    for key, val in osc_values.items():
+                        if self.osc_param_enabled.get(key, True):
+                            self.osc_client.send_message(f"/avatar/parameters/FT/v2/{key}", float(val))
                 except Exception as e:
                     self._show_error_dialog("OSC Error", f"Failed to send OSC:\n{e}", key="osc_send")
                     self.osc_enabled = False
@@ -1848,7 +2314,7 @@ class VREyebrowTrackerGUI(QMainWindow):
 
     def _start_training(self, data_dir, train_csv, val_csv):
         self._set_training_buttons(False)
-        self.thread = TrainingThread(data_dir, train_csv, val_csv, parent=self)
+        self.thread = TrainingThread(data_dir, train_csv, val_csv, use_lr_models=self.use_lr_models, parent=self)
         self.thread.progress.connect(self.update_training_status)
         self.thread.finished.connect(self.training_finished)
         self.thread.start()
@@ -1860,6 +2326,72 @@ class VREyebrowTrackerGUI(QMainWindow):
     def _refresh_button_style(self, btn):
         btn.style().unpolish(btn)
         btn.style().polish(btn)
+
+    def _apply_deadzone_boost(self, x):
+        dz = self.slider_deadzone.value() / 100.0
+        boost = self.slider_boost.value() / 100.0
+        if dz >= 1.0:
+            return 0.0
+        if abs(x) < dz:
+            return 0.0
+        sign = 1.0 if x >= 0 else -1.0
+        y = (abs(x) - dz) / (1.0 - dz)
+        y = y * boost
+        return max(-1.0, min(1.0, sign * y))
+
+    def _apply_deadzone_boost_param(self, x, key):
+        if key in getattr(self, "param_deadzone_sliders", {}):
+            dz = self.param_deadzone_sliders[key].value() / 100.0
+            boost_pos = self.param_boost_pos_sliders[key].value() / 100.0
+            boost_neg = self.param_boost_neg_sliders[key].value() / 100.0
+        else:
+            dz = self.slider_deadzone.value() / 100.0
+            boost_pos = self.slider_boost_pos.value() / 100.0
+            boost_neg = self.slider_boost_neg.value() / 100.0
+        if dz >= 1.0:
+            return 0.0
+        if abs(x) < dz:
+            return 0.0
+        sign = 1.0 if x >= 0 else -1.0
+        y = (abs(x) - dz) / (1.0 - dz)
+        y = y * (boost_pos if sign >= 0 else boost_neg)
+        return max(-1.0, min(1.0, sign * y))
+
+    def _toggle_param_osc(self, key, state):
+        self.osc_param_enabled[key] = (state == Qt.Checked)
+        self._update_setting(f"osc_enable_{key}", self.osc_param_enabled[key])
+
+    def _toggle_osc_debug(self, state):
+        self.osc_debug_enabled = (state == Qt.Checked)
+        if hasattr(self, "osc_debug_widget"):
+            if self.osc_debug_enabled:
+                ordered = [(self.osc_param_labels.get(k, k), self.osc_param_values.get(k, 0.0)) for k in self.osc_param_order]
+                self.osc_debug_widget.set_data(ordered)
+                if hasattr(self, "values_row_widget"):
+                    ordered_vals = [(self.osc_param_labels.get(k, k), self.osc_param_values.get(k, 0.0)) for k in self.osc_param_order]
+                    self.values_row_widget.set_data(ordered_vals)
+        if hasattr(self, "graph_stack"):
+            self.graph_stack.setCurrentIndex(1 if self.osc_debug_enabled else 0)
+
+    def _toggle_lr_models(self, state):
+        self.use_lr_models = (state == Qt.Checked)
+        if self.use_lr_models:
+            self.lbl_current_model.setText("Eyebrow: L/R Separate (Beta)")
+        else:
+            if self.current_model_path and os.path.exists(self.current_model_path):
+                self.lbl_current_model.setText(os.path.basename(self.current_model_path))
+            else:
+                self.lbl_current_model.setText("Eyebrow: None Loaded")
+
+    def _compute_osc_values(self, brow_l, brow_r, inner_l, inner_r, outer_l, outer_r):
+        return {
+            "BrowExpressionLeft": float(brow_l),
+            "BrowExpressionRight": float(brow_r),
+            "BrowInnerUpLeft": float(inner_l),
+            "BrowInnerUpRight": float(inner_r),
+            "BrowOuterUpLeft": float(outer_l),
+            "BrowOuterUpRight": float(outer_r),
+        }
 
     def _show_error_dialog(self, title, message, key=None, interval=3.0):
         if key is None:
@@ -1878,9 +2410,15 @@ class VREyebrowTrackerGUI(QMainWindow):
         self._set_training_buttons(True)
         if new_model_path:
             try:
-                self.load_weights(new_model_path)
-                self.lbl_current_model.setText(f"{new_model_path} (Newly Trained!)")
-            except: pass
+                if isinstance(new_model_path, (list, tuple)) and len(new_model_path) == 2:
+                    lpath, rpath = new_model_path
+                    if self.load_weights_lr(lpath, rpath):
+                        self.lbl_current_model.setText(f"L/R Loaded: {os.path.basename(lpath)} | {os.path.basename(rpath)} (Newly Trained!)")
+                else:
+                    self.load_weights(new_model_path)
+                    self.lbl_current_model.setText(f"{new_model_path} (Newly Trained!)")
+            except:
+                pass
 
     def _append_log(self, text):
         if not hasattr(self, "txt_console"):

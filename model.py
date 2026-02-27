@@ -30,8 +30,8 @@ class TinyBrowNet(nn.Module):
         self.fc1 = nn.Linear(64 * 4 * 4, 128)
         self.bn_fc = nn.BatchNorm1d(128)
         self.dropout = nn.Dropout(0.5)
-        # Output 1 continuous value: [brow]
-        self.fc2 = nn.Linear(128, 1)
+        # Output 3 continuous values: [brow, inner, outer]
+        self.fc2 = nn.Linear(128, 3)
         
     def forward(self, x):
         # Apply convolutions, batch normalizations, activation, and pooling
@@ -63,4 +63,4 @@ if __name__ == "__main__":
     model.eval() # Prevent BatchNorm ValueError on batch_size=1
     dummy_input = torch.randn(1, 1, 64, 64)
     output = model(dummy_input)
-    print(f"Output shape: {output.shape}, Value: {output.item():.4f}")
+    print(f"Output shape: {output.shape}, Value: {output.squeeze().tolist()}")

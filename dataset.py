@@ -60,7 +60,14 @@ class EyebrowDataset(Dataset):
         crop_top = 0
 
         # Read labels
-        brow_value = float(self.annotations.iloc[idx, 1])
+        if "brow" in self.annotations.columns and "inner" in self.annotations.columns and "outer" in self.annotations.columns:
+            brow_value = float(self.annotations.loc[idx, "brow"])
+            inner_value = float(self.annotations.loc[idx, "inner"])
+            outer_value = float(self.annotations.loc[idx, "outer"])
+        else:
+            brow_value = float(self.annotations.iloc[idx, 1])
+            inner_value = brow_value
+            outer_value = brow_value
 
         import torchvision.transforms.functional as TF
         import torchvision.transforms as T
@@ -92,7 +99,7 @@ class EyebrowDataset(Dataset):
         if self.is_train:
             image = image + torch.randn_like(image) * 0.05
 
-        labels_tensor = torch.tensor([brow_value], dtype=torch.float32)
+        labels_tensor = torch.tensor([brow_value, inner_value, outer_value], dtype=torch.float32)
 
         return image, labels_tensor
 
