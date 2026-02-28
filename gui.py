@@ -349,11 +349,12 @@ class TrainingThread(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(object)
 
-    def __init__(self, data_dir, train_csv, val_csv, use_lr_models=False, parent=None):
+    def __init__(self, data_dir, train_csv, val_csv, model_dir, use_lr_models=False, parent=None):
         super().__init__(parent)
         self.data_dir = str(data_dir)
         self.train_csv = str(train_csv)
         self.val_csv = str(val_csv)
+        self.model_dir = str(model_dir)
         self.use_lr_models = use_lr_models
     
     def run(self):
@@ -371,23 +372,8 @@ class TrainingThread(QThread):
             self.progress.emit("Training in progress (check terminal for logs)...")
             timestamp = time.strftime("%Y%m%d_%H%M%S")
 
-            # fall back to default appdata-based paths if none provided
-            appdata = os.getenv("APPDATA")
-            if appdata:
-                base_dir = Path(appdata) / "VREyebrowTracker"
-            else:
-                base_dir = Path("data")
-
-            if not DATA_DIR:
-                DATA_DIR = str(base_dir / "eyebrow_images")
-            if not TRAIN_CSV:
-                TRAIN_CSV = str(base_dir / "train.csv")
-            if not VAL_CSV:
-                VAL_CSV = str(base_dir / "val.csv")
-
-            model_dir = base_dir / "models"
+            model_dir = Path(self.model_dir)
             model_dir.mkdir(parents=True, exist_ok=True)
-
             if self.use_lr_models:
                 save_left = str(model_dir / f"model_left_{timestamp}.pth")
                 save_right = str(model_dir / f"model_right_{timestamp}.pth")
@@ -600,6 +586,9 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.model_left = TinyBrowNet().to(self.device)
         self.model_right = TinyBrowNet().to(self.device)
         self.use_lr_models = False
+        self.model_main_has_inner_outer = True
+        self.model_left_has_inner_outer = True
+        self.model_right_has_inner_outer = True
         self.current_model_path = "None Loaded"
         self.current_model_left_path = ""
         self.current_model_right_path = ""
@@ -890,9 +879,12 @@ class VREyebrowTrackerGUI(QMainWindow):
         
     def _load_state_dict_compat(self, model, state_dict):
         current_dict = model.state_dict()
+        has_inner_outer = True
         if 'fc2.weight' in state_dict and 'fc2.weight' in current_dict:
             out_old = state_dict['fc2.weight'].shape[0]
             out_new = current_dict['fc2.weight'].shape[0]
+            if out_new >= 3 and out_old < 3:
+                has_inner_outer = False
             if out_old != out_new:
                 new_fc2_weight = current_dict['fc2.weight'].clone()
                 new_fc2_bias = current_dict['fc2.bias'].clone()
@@ -903,11 +895,12 @@ class VREyebrowTrackerGUI(QMainWindow):
                 state_dict['fc2.bias'] = new_fc2_bias
         model.load_state_dict(state_dict)
         model.eval()
+        return has_inner_outer
 
     def load_weights(self, path):
         try:
             state_dict = torch.load(path, map_location=self.device)
-            self._load_state_dict_compat(self.model, state_dict)
+            self.model_main_has_inner_outer = self._load_state_dict_compat(self.model, state_dict)
             self.current_model_path = path
             return True
         except Exception as e:
@@ -918,8 +911,8 @@ class VREyebrowTrackerGUI(QMainWindow):
         try:
             state_left = torch.load(left_path, map_location=self.device)
             state_right = torch.load(right_path, map_location=self.device)
-            self._load_state_dict_compat(self.model_left, state_left)
-            self._load_state_dict_compat(self.model_right, state_right)
+            self.model_left_has_inner_outer = self._load_state_dict_compat(self.model_left, state_left)
+            self.model_right_has_inner_outer = self._load_state_dict_compat(self.model_right, state_right)
             self.current_model_left_path = left_path
             self.current_model_right_path = right_path
             self._update_setting("last_model_left_path", left_path)
@@ -1221,12 +1214,6 @@ class VREyebrowTrackerGUI(QMainWindow):
         btn_load_model = QPushButton("Load Eyebrow Weights (.pth)")
         btn_load_model.clicked.connect(self.browse_weights)
         grp_model_layout.addWidget(btn_load_model)
-
-        self.chk_lr_models = QCheckBox("Beta: Separate L/R Models")
-        self.chk_lr_models.setChecked(False)
-        self.chk_lr_models.stateChanged.connect(self._toggle_lr_models)
-        self.chk_lr_models.stateChanged.connect(lambda v: self._update_setting("use_lr_models", v == Qt.Checked))
-        grp_model_layout.addWidget(self.chk_lr_models)
         
         self.lbl_current_model = QLabel("Eyebrow: None Loaded")
         self.lbl_current_model.setProperty("class", "muted-label")
@@ -1433,11 +1420,6 @@ class VREyebrowTrackerGUI(QMainWindow):
         
         # Dataset Management
         data_layout = QHBoxLayout()
-        data_layout.addWidget(QLabel("Max Images:"))
-        self.txt_dataset_limit = QLineEdit("15000")
-        self.txt_dataset_limit.setFixedWidth(50)
-        data_layout.addWidget(self.txt_dataset_limit)
-        
         self.lbl_dataset_status = QLabel("  |  Current Saved Dataset: 0 images")
         self.lbl_dataset_status.setProperty("class", "muted-label")
         data_layout.addWidget(self.lbl_dataset_status)
@@ -1453,6 +1435,15 @@ class VREyebrowTrackerGUI(QMainWindow):
         lbl_train.setFont(QFont("Arial", 12, QFont.Bold))
         lbl_train.setProperty("class", "header-label")
         layout.addWidget(lbl_train)
+
+        train_mode_row = QHBoxLayout()
+        self.chk_lr_models = QCheckBox("Beta: Separate L/R Models")
+        self.chk_lr_models.setChecked(False)
+        self.chk_lr_models.stateChanged.connect(self._toggle_lr_models)
+        self.chk_lr_models.stateChanged.connect(lambda v: self._update_setting("use_lr_models", v == Qt.Checked))
+        train_mode_row.addWidget(self.chk_lr_models)
+        train_mode_row.addStretch(1)
+        layout.addLayout(train_mode_row)
         
         train_btn_row = QHBoxLayout()
         self.btn_train = QPushButton("BAKE MODEL (Start Training)")
@@ -1479,22 +1470,19 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.calib_states = [
             {"name": "REST (Prepare for Neutral)", "target": None, "duration": 3.0},
             {"name": "NEUTRAL (Resting)", "target": 0.0, "folder": "neutral_resting", "duration": 10.0},
+            {"name": "NEUTRAL + Random Gaze (Hold 2s)", "target": 0.0, "folder": "neutral_random_gaze", "duration": 25.0},
             {"name": "REST (Prepare for Surprised)", "target": None, "duration": 3.0},
             {"name": "SURPRISED (Brows UP)", "target": 1.0, "folder": "surprised_brows_up", "duration": 10.0},
+            {"name": "SURPRISED + Random Gaze (Hold 2s)", "target": 1.0, "folder": "surprised_brows_up_random_gaze", "duration": 25.0},
             {"name": "REST (Prepare for Lower Eyebrow)", "target": None, "duration": 3.0},
             {"name": "LOWER EYEBROW (Frown)", "target": -1.0, "folder": "frown_brows_down", "duration": 10.0},
+            {"name": "FROWN + Random Gaze (Hold 2s)", "target": -1.0, "folder": "frown_brows_down_random_gaze", "duration": 25.0},
             {"name": "REST (Prepare for Sad)", "target": None, "duration": 3.0},
             {"name": "SAD (Inner Brows UP)", "target": 0.5, "folder": "sad_inner_brows_up", "duration": 10.0},
+            {"name": "SAD INNER + Random Gaze (Hold 2s)", "target": 0.5, "folder": "sad_inner_brows_up_random_gaze", "duration": 25.0},
             {"name": "REST (Prepare for Smile)", "target": None, "duration": 3.0},
             {"name": "SMILE (Outer Brows DOWN)", "target": -0.5, "folder": "smile_outer_brows_down", "duration": 10.0},
-            {"name": "REST (Keep Brows Neutral, prepare to look UP)", "target": None, "duration": 3.0},
-            {"name": "NEUTRAL BROW + Look UP", "target": 0.0, "folder": "neutral_brow_look_up", "duration": 10.0},
-            {"name": "REST (Keep Brows Neutral, prepare to look DOWN)", "target": None, "duration": 3.0},
-            {"name": "NEUTRAL BROW + Look DOWN", "target": 0.0, "folder": "neutral_brow_look_down", "duration": 10.0},
-            {"name": "REST (Keep Brows Neutral, prepare to look LEFT)", "target": None, "duration": 3.0},
-            {"name": "NEUTRAL BROW + Look LEFT", "target": 0.0, "folder": "neutral_brow_look_left", "duration": 10.0},
-            {"name": "REST (Keep Brows Neutral, prepare to look RIGHT)", "target": None, "duration": 3.0},
-            {"name": "NEUTRAL BROW + Look RIGHT", "target": 0.0, "folder": "neutral_brow_look_right", "duration": 10.0}
+            {"name": "SMILE OUTER + Random Gaze (Hold 2s)", "target": -0.5, "folder": "smile_outer_brows_down_random_gaze", "duration": 25.0}
         ]
         self.calib_idx = 0
         self.calib_start_time = 0.0
@@ -1815,12 +1803,8 @@ class VREyebrowTrackerGUI(QMainWindow):
 
     def browse_weights(self):
         options = QFileDialog.Options()
+        start_dir = self._get_model_dir(self.use_lr_models)
         if self.use_lr_models:
-            appdata = os.getenv("APPDATA")
-            if appdata:
-                start_dir = str(Path(appdata) / "VREyebrowTracker" / "models")
-            else:
-                start_dir = ""
             left_path, _ = QFileDialog.getOpenFileName(self, "Select LEFT Eyebrow Weights", start_dir, "PyTorch Models (*.pth *.pt);;All Files (*)", options=options)
             if not left_path:
                 return
@@ -1834,11 +1818,6 @@ class VREyebrowTrackerGUI(QMainWindow):
             else:
                 QMessageBox.critical(self, "Error", "Failed to load L/R weights.")
         else:
-            appdata = os.getenv("APPDATA")
-            if appdata:
-                start_dir = str(Path(appdata) / "VREyebrowTracker" / "models")
-            else:
-                start_dir = ""
             file_name, _ = QFileDialog.getOpenFileName(self, "Select Eyebrow Weights", start_dir, "PyTorch Models (*.pth *.pt);;All Files (*)", options=options)
             if file_name:
                 success = self.load_weights(file_name)
@@ -1882,10 +1861,8 @@ class VREyebrowTrackerGUI(QMainWindow):
             cv2.imwrite(str(self.eyebrow_images_dir / name_r), cv2.flip(gray_r, 1))
             self.recorded_frames.append({"filename": name_r, "brow": brow_t, "inner": inner_t, "outer": outer_t})
             
-            try: limit = int(self.txt_dataset_limit.text())
-            except: limit = 15000
-            
-            was_pruned = self.prune_dataset(self.recorded_frames, self.eyebrow_images_dir, lambda r: r.get('brow', r.get('label', 0.0)), limit)
+            limit = None
+            was_pruned = False
             
             df = pd.DataFrame(self.recorded_frames)
             df = df.sample(frac=1).reset_index(drop=True)
@@ -2142,6 +2119,21 @@ class VREyebrowTrackerGUI(QMainWindow):
                             raw_brow_r = out_r_t[0][0].item() if out_r_t.numel() > 0 else 0.0
                             raw_inner_r = raw_brow_r
                             raw_outer_r = raw_brow_r
+
+                        # If loaded weights are legacy (no inner/outer), mirror brow outputs
+                        if self.use_lr_models:
+                            if not self.model_left_has_inner_outer:
+                                raw_inner_l = raw_brow_l
+                                raw_outer_l = raw_brow_l
+                            if not self.model_right_has_inner_outer:
+                                raw_inner_r = raw_brow_r
+                                raw_outer_r = raw_brow_r
+                        else:
+                            if not self.model_main_has_inner_outer:
+                                raw_inner_l = raw_brow_l
+                                raw_outer_l = raw_brow_l
+                                raw_inner_r = raw_brow_r
+                                raw_outer_r = raw_brow_r
                                 
                     # --- AUTO BASELINE CORRECTION LOGIC (1D Statistical Variance) ---
                     self.brow_history_l.append(raw_brow_l)
@@ -2314,7 +2306,8 @@ class VREyebrowTrackerGUI(QMainWindow):
 
     def _start_training(self, data_dir, train_csv, val_csv):
         self._set_training_buttons(False)
-        self.thread = TrainingThread(data_dir, train_csv, val_csv, use_lr_models=self.use_lr_models, parent=self)
+        model_dir = self._get_model_dir(self.use_lr_models)
+        self.thread = TrainingThread(data_dir, train_csv, val_csv, model_dir, use_lr_models=self.use_lr_models, parent=self)
         self.thread.progress.connect(self.update_training_status)
         self.thread.finished.connect(self.training_finished)
         self.thread.start()
@@ -2326,6 +2319,19 @@ class VREyebrowTrackerGUI(QMainWindow):
     def _refresh_button_style(self, btn):
         btn.style().unpolish(btn)
         btn.style().polish(btn)
+
+    def _get_model_dir(self, use_lr=None):
+        if use_lr is None:
+            use_lr = self.use_lr_models
+        appdata = os.getenv("APPDATA")
+        if appdata:
+            base_dir = Path(appdata) / "VREyebrowTracker"
+        else:
+            base_dir = Path("data")
+        subdir = "models_lr" if use_lr else "models_single"
+        model_dir = base_dir / subdir
+        model_dir.mkdir(parents=True, exist_ok=True)
+        return str(model_dir)
 
     def _apply_deadzone_boost(self, x):
         dz = self.slider_deadzone.value() / 100.0
