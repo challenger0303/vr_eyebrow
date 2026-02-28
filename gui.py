@@ -10,6 +10,7 @@ import torch
 import torchvision
 import numpy as np
 import pandas as pd
+import subprocess
 from pathlib import Path
 from PIL import Image
 import requests
@@ -589,6 +590,9 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.model_main_has_inner_outer = True
         self.model_left_has_inner_outer = True
         self.model_right_has_inner_outer = True
+        self.model.eval()
+        self.model_left.eval()
+        self.model_right.eval()
         self.current_model_path = "None Loaded"
         self.current_model_left_path = ""
         self.current_model_right_path = ""
@@ -621,6 +625,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.val_csv_path = self.data_dir / "val.csv"
         self.camera_devices = []
         self._camera_scan_thread = None
+        self.camera_friendly_names = []
         
         # Auto-Baseline State
         self.brow_history_l = []
@@ -652,6 +657,9 @@ class VREyebrowTrackerGUI(QMainWindow):
             "BrowOuterUpRight": "OuterR",
         }
         self.osc_param_enabled = {k: True for k in self.osc_param_order}
+        self.use_combined_feed = False
+        self.combined_rotate = 0
+        self.hmd_profile = "DIY"
         
         if self.csv_path.exists():
             try:
@@ -714,6 +722,20 @@ class VREyebrowTrackerGUI(QMainWindow):
                 cap.release()
         return available
 
+    def _get_camera_friendly_names(self):
+        try:
+            cmd = "Get-PnpDevice -Class Camera | Select-Object -ExpandProperty FriendlyName"
+            result = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True)
+            names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            if names:
+                return names
+            cmd = "Get-PnpDevice -Class Image | Select-Object -ExpandProperty FriendlyName"
+            result = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True)
+            names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            return names
+        except Exception:
+            return []
+
     def _load_settings(self):
         try:
             if self.settings_path.exists():
@@ -741,6 +763,99 @@ class VREyebrowTrackerGUI(QMainWindow):
                 combo.setCurrentIndex(i)
                 return
 
+    def _set_hmd_combo(self, label):
+        if not hasattr(self, "cmb_hmd"):
+            return
+        for i in range(self.cmb_hmd.count()):
+            if self.cmb_hmd.itemText(i) == label:
+                self.cmb_hmd.setCurrentIndex(i)
+                return
+
+    def _on_hmd_changed(self, idx):
+        if not hasattr(self, "cmb_hmd"):
+            return
+        self.hmd_profile = self.cmb_hmd.itemText(idx)
+        self._update_setting("hmd_profile", self.hmd_profile)
+        self._apply_hmd_ui()
+
+    def _apply_hmd_ui(self):
+        is_bigscreen = (self.hmd_profile == "Bigscreen Beyond 2e")
+        self.use_combined_feed = is_bigscreen
+        self._update_setting("combined_feed", self.use_combined_feed)
+        if is_bigscreen and hasattr(self, "cmb_cam_l"):
+            # reset to selection placeholder so we don't reuse a previous camera
+            self.cmb_cam_l.setCurrentIndex(0)
+        # Stop streams on HMD change
+        if getattr(self, "is_connected_left", False):
+            try:
+                self.toggle_left_connection()
+            except Exception:
+                pass
+        if getattr(self, "is_connected_right", False):
+            try:
+                self.toggle_right_connection()
+            except Exception:
+                pass
+        # Adjust camera combo label
+        if hasattr(self, "cmb_cam_l") and self.cmb_cam_l.count() > 0:
+            self.cmb_cam_l.setItemText(0, "Select Camera" if is_bigscreen else "URL")
+        if hasattr(self, "cmb_cam_r") and self.cmb_cam_r.count() > 0:
+            self.cmb_cam_r.setItemText(0, "Select Camera" if is_bigscreen else "URL")
+        if hasattr(self, "chk_combined"):
+            self.chk_combined.blockSignals(True)
+            self.chk_combined.setChecked(self.use_combined_feed)
+            self.chk_combined.blockSignals(False)
+        # Single stream button when combined
+        if hasattr(self, "btn_connect_right"):
+            self.btn_connect_right.setVisible(not is_bigscreen)
+        if hasattr(self, "btn_connect_left"):
+            self.btn_connect_left.setText("Start Stream" if is_bigscreen else "Start Left Stream")
+        # Hide address input, keep feed selection
+        if hasattr(self, "txt_cam_l"):
+            self.txt_cam_l.setVisible(not is_bigscreen)
+        if hasattr(self, "txt_cam_r"):
+            self.txt_cam_r.setVisible(not is_bigscreen)
+        if hasattr(self, "cmb_cam_r"):
+            self.cmb_cam_r.setVisible(not is_bigscreen)
+        if hasattr(self, "right_cam_spacer"):
+            self.right_cam_spacer.setVisible(is_bigscreen)
+        # Auto-select camera if only one device (Bigeye-like)
+        if is_bigscreen and hasattr(self, "cmb_cam_l") and self.camera_devices:
+            if self.cmb_cam_l.currentData() == "url":
+                # Try to auto-select Bigeye by friendly name if available
+                if self.camera_friendly_names:
+                    for idx, name in enumerate(self.camera_friendly_names[:len(self.camera_devices)]):
+                        if "bigeye" in name.lower():
+                            self._set_camera_combo(self.cmb_cam_l, self.camera_devices[idx])
+                            return
+                # Fallback: if only one device, select it
+                if len(self.camera_devices) == 1:
+                    self._set_camera_combo(self.cmb_cam_l, self.camera_devices[0])
+
+    def _toggle_combined_feed(self, state):
+        self.use_combined_feed = (state == Qt.Checked)
+
+    def _apply_combined_transform(self, frame_bgr):
+        if frame_bgr is None:
+            return None
+        rot = self.cmb_combined_rotate.currentData() if hasattr(self, "cmb_combined_rotate") else 0
+        if rot == 90:
+            return cv2.rotate(frame_bgr, cv2.ROTATE_90_CLOCKWISE)
+        if rot == 180:
+            return cv2.rotate(frame_bgr, cv2.ROTATE_180)
+        if rot == 270:
+            return cv2.rotate(frame_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return frame_bgr
+
+    def _split_combined_frame(self, frame_bgr):
+        if frame_bgr is None:
+            return None, None
+        h, w = frame_bgr.shape[:2]
+        mid = w // 2
+        left = frame_bgr[:, :mid]
+        right = frame_bgr[:, mid:]
+        return left, right
+
     def _get_camera_source(self, combo, url_text):
         data = combo.currentData()
         if data == "url" or data is None:
@@ -762,6 +877,8 @@ class VREyebrowTrackerGUI(QMainWindow):
 
     def _apply_camera_scan(self, devices):
         self.camera_devices = list(devices)
+        self.camera_friendly_names = self._get_camera_friendly_names()
+        use_names = len(self.camera_friendly_names) == len(self.camera_devices)
         left_sel = self.cmb_cam_l.currentData()
         right_sel = self.cmb_cam_r.currentData()
         
@@ -770,13 +887,19 @@ class VREyebrowTrackerGUI(QMainWindow):
         
         self.cmb_cam_l.clear()
         self.cmb_cam_l.addItem("URL", "url")
-        for i in self.camera_devices:
-            self.cmb_cam_l.addItem(f"Cam {i}", i)
+        for idx, i in enumerate(self.camera_devices):
+            label = f"Device {i}"
+            if use_names and idx < len(self.camera_friendly_names):
+                label = f"{self.camera_friendly_names[idx]}"
+            self.cmb_cam_l.addItem(label, i)
         
         self.cmb_cam_r.clear()
         self.cmb_cam_r.addItem("URL", "url")
-        for i in self.camera_devices:
-            self.cmb_cam_r.addItem(f"Cam {i}", i)
+        for idx, i in enumerate(self.camera_devices):
+            label = f"Device {i}"
+            if use_names and idx < len(self.camera_friendly_names):
+                label = f"{self.camera_friendly_names[idx]}"
+            self.cmb_cam_r.addItem(label, i)
         
         self.cmb_cam_l.blockSignals(False)
         self.cmb_cam_r.blockSignals(False)
@@ -786,6 +909,8 @@ class VREyebrowTrackerGUI(QMainWindow):
 
         self.btn_scan_cam.setEnabled(True)
         self.btn_scan_cam.setText("Scan Cams")
+        if hasattr(self, "cmb_hmd"):
+            self._apply_hmd_ui()
 
     def _handle_camera_scan_error(self, message):
         self.btn_scan_cam.setEnabled(True)
@@ -810,14 +935,14 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.slider_smooth.setValue(int(s["smooth"]))
         if "sync" in s:
             self.slider_sync.setValue(int(s["sync"]))
-        if "deadzone" in s:
+        if "deadzone" in s and hasattr(self, "slider_deadzone"):
             self.slider_deadzone.setValue(int(s["deadzone"]))
-        if "boost" in s:
+        if "boost" in s and hasattr(self, "slider_boost_pos") and hasattr(self, "slider_boost_neg"):
             self.slider_boost_pos.setValue(int(s["boost"]))
             self.slider_boost_neg.setValue(int(s["boost"]))
-        if "boost_pos" in s:
+        if "boost_pos" in s and hasattr(self, "slider_boost_pos"):
             self.slider_boost_pos.setValue(int(s["boost_pos"]))
-        if "boost_neg" in s:
+        if "boost_neg" in s and hasattr(self, "slider_boost_neg"):
             self.slider_boost_neg.setValue(int(s["boost_neg"]))
         for k in self.osc_param_order:
             dz_key = f"deadzone_{k}"
@@ -844,6 +969,14 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.use_lr_models = bool(s["use_lr_models"])
             if hasattr(self, "chk_lr_models"):
                 self.chk_lr_models.setChecked(self.use_lr_models)
+        if "hmd_profile" in s and hasattr(self, "cmb_hmd"):
+            self._set_hmd_combo(s["hmd_profile"])
+        if "combined_feed" in s:
+            self.use_combined_feed = bool(s["combined_feed"])
+            if hasattr(self, "chk_combined"):
+                self.chk_combined.setChecked(self.use_combined_feed)
+        if "combined_rotate" in s and hasattr(self, "cmb_combined_rotate"):
+            self._set_camera_combo(self.cmb_combined_rotate, s["combined_rotate"])
         if "last_model_path" in s:
             path = s["last_model_path"]
             if path and os.path.exists(path):
@@ -854,6 +987,8 @@ class VREyebrowTrackerGUI(QMainWindow):
             rpath = s.get("last_model_right_path")
             if lpath and rpath and os.path.exists(lpath) and os.path.exists(rpath):
                 self.load_weights_lr(lpath, rpath)
+        if hasattr(self, "cmb_hmd"):
+            self._apply_hmd_ui()
 
     def on_device_changed(self, idx):
         if idx < 0 or idx >= len(self.available_devices):
@@ -938,11 +1073,27 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.btn_connect_right.setProperty("class", "primary-btn")
         self.btn_connect_right.clicked.connect(self.toggle_right_connection)
         top_bar.addWidget(self.btn_connect_right)
-        
-        self.btn_theme = QPushButton("☀️ Light Mode")
+
+        theme_hmd_col = QVBoxLayout()
+        self.btn_theme = QPushButton("Light Mode")
         self.btn_theme.setProperty("class", "theme-btn")
         self.btn_theme.clicked.connect(self.toggle_theme)
-        top_bar.addWidget(self.btn_theme)
+        theme_hmd_col.addWidget(self.btn_theme)
+
+        self.cmb_hmd = QComboBox()
+        self.cmb_hmd.addItem("Pimax Crystal / Super QLED")
+        self.cmb_hmd.addItem("VIVE PRO EYE")
+        self.cmb_hmd.addItem("Varjo")
+        self.cmb_hmd.addItem("HP Reverb G2")
+        self.cmb_hmd.addItem("Pimax Dream Air")
+        self.cmb_hmd.addItem("Pimax Crystal Super uOLED")
+        self.cmb_hmd.addItem("Bigscreen Beyond 2e")
+        self.cmb_hmd.addItem("DIY")
+        self.cmb_hmd.currentIndexChanged.connect(self._on_hmd_changed)
+        theme_hmd_col.addWidget(self.cmb_hmd)
+
+        top_bar.addLayout(theme_hmd_col)
+
         
         main_layout.addLayout(top_bar)
         
@@ -978,22 +1129,30 @@ class VREyebrowTrackerGUI(QMainWindow):
         
         self.txt_cam_l = QLineEdit("http://127.0.0.1:5555/eye/left")
         self.txt_cam_l.setPlaceholderText("Left Camera ESP32 URL...")
+        self.txt_cam_l.setMinimumWidth(0)
+        self.txt_cam_l.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.txt_cam_l.textChanged.connect(lambda v: self._update_setting("cam_left", v))
         
         self.cmb_cam_l = QComboBox()
+        self.cmb_cam_l.setMinimumWidth(52)
+        self.cmb_cam_l.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.cmb_cam_l.addItem("URL", "url")
         for i in self.camera_devices:
             self.cmb_cam_l.addItem(f"Cam {i}", i)
         self.cmb_cam_l.currentIndexChanged.connect(lambda idx: self._update_setting("cam_left_source", self.cmb_cam_l.itemData(idx)))
         
         cam_l_row = QHBoxLayout()
+        cam_l_row.setContentsMargins(0, 0, 0, 0)
+        cam_l_row.setSpacing(6)
         cam_l_row.addWidget(self.txt_cam_l)
         cam_l_row.addWidget(self.cmb_cam_l)
+        self.cam_l_row = cam_l_row
         
-        self.btn_scan_cam = QPushButton("Scan")
+        self.btn_scan_cam = QPushButton("Scan Cams")
         self.btn_scan_cam.setToolTip("Rescan local camera devices")
         self.btn_scan_cam.clicked.connect(self.scan_cameras)
-        cam_l_row.addWidget(self.btn_scan_cam)
+        self.btn_scan_cam.setFixedWidth(120)
+        
         
         self.left_img_label = QLabel("Left Eye Stream")
         self.left_img_label.setFixedSize(220, 220)
@@ -1007,7 +1166,16 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.lbl_l_brow = QLabel("Brow Slider: 0.00")
         self.lbl_l_brow.setAlignment(Qt.AlignCenter)
         
-        self.left_eye_box.addWidget(self.lbl_l_fps)
+        top_left_row = QHBoxLayout()
+        top_left_row.setContentsMargins(0, 0, 0, 0)
+        top_left_row.setSpacing(6)
+        top_left_row.addWidget(self.btn_scan_cam)
+        top_left_row.addStretch(1)
+        top_left_row.addWidget(self.lbl_l_fps)
+        top_left_widget = QWidget()
+        top_left_widget.setLayout(top_left_row)
+        top_left_widget.setFixedHeight(max(self.btn_scan_cam.sizeHint().height(), 32))
+        self.left_eye_box.addWidget(top_left_widget)
         self.left_eye_box.addLayout(cam_l_row)
         self.left_eye_box.addWidget(self.left_img_label)
         self.left_eye_box.addWidget(lbl_l)
@@ -1022,17 +1190,28 @@ class VREyebrowTrackerGUI(QMainWindow):
         
         self.txt_cam_r = QLineEdit("http://127.0.0.1:5555/eye/right")
         self.txt_cam_r.setPlaceholderText("Right Camera ESP32 URL...")
+        self.txt_cam_r.setMinimumWidth(0)
+        self.txt_cam_r.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.txt_cam_r.textChanged.connect(lambda v: self._update_setting("cam_right", v))
         
         self.cmb_cam_r = QComboBox()
+        self.cmb_cam_r.setMinimumWidth(52)
+        self.cmb_cam_r.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.cmb_cam_r.addItem("URL", "url")
         for i in self.camera_devices:
             self.cmb_cam_r.addItem(f"Cam {i}", i)
         self.cmb_cam_r.currentIndexChanged.connect(lambda idx: self._update_setting("cam_right_source", self.cmb_cam_r.itemData(idx)))
         
         cam_r_row = QHBoxLayout()
+        cam_r_row.setContentsMargins(0, 0, 0, 0)
+        cam_r_row.setSpacing(6)
         cam_r_row.addWidget(self.txt_cam_r)
         cam_r_row.addWidget(self.cmb_cam_r)
+        self.right_cam_spacer = QWidget()
+        self.right_cam_spacer.setFixedHeight(self.txt_cam_l.sizeHint().height() if hasattr(self, "txt_cam_l") else 28)
+        self.right_cam_spacer.setVisible(False)
+        cam_r_row.addWidget(self.right_cam_spacer)
+        self.cam_r_row = cam_r_row
         
         self.right_img_label = QLabel("Right Eye Stream")
         self.right_img_label.setFixedSize(220, 220)
@@ -1046,14 +1225,25 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.lbl_r_brow = QLabel("Brow Slider: 0.00")
         self.lbl_r_brow.setAlignment(Qt.AlignCenter)
         
-        self.right_eye_box.addWidget(self.lbl_r_fps)
+        top_right_row = QHBoxLayout()
+        top_right_row.setContentsMargins(0, 0, 0, 0)
+        top_right_row.setSpacing(6)
+        self.right_top_spacer = QWidget()
+        self.right_top_spacer.setFixedSize(self.btn_scan_cam.sizeHint())
+        top_right_row.addWidget(self.right_top_spacer)
+        top_right_row.addStretch(1)
+        top_right_row.addWidget(self.lbl_r_fps)
+        top_right_widget = QWidget()
+        top_right_widget.setLayout(top_right_row)
+        top_right_widget.setFixedHeight(max(self.btn_scan_cam.sizeHint().height(), 32))
+        self.right_eye_box.addWidget(top_right_widget)
         self.right_eye_box.addLayout(cam_r_row)
         self.right_eye_box.addWidget(self.right_img_label)
         self.right_eye_box.addWidget(lbl_r)
         self.right_eye_box.addWidget(self.lbl_r_brow)
         
-        cam_row.addLayout(self.left_eye_box)
-        cam_row.addLayout(self.right_eye_box)
+        cam_row.addLayout(self.left_eye_box, 1)
+        cam_row.addLayout(self.right_eye_box, 1)
         eye_layout.addLayout(cam_row)
         
         # Manual Override Group (debug-only container)
@@ -1168,9 +1358,10 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.graph_stack = QStackedLayout()
         self.graph_stack.addWidget(self.grp_graph)
         self.graph_stack.addWidget(debug_page)
-        graph_stack_widget = QWidget()
-        graph_stack_widget.setLayout(self.graph_stack)
-        eye_layout.addWidget(graph_stack_widget)
+        self.graph_stack_widget = QWidget()
+        self.graph_stack_widget.setLayout(self.graph_stack)
+        self.graph_stack_widget.setMaximumHeight(220)
+        eye_layout.addWidget(self.graph_stack_widget)
 
         # Debug Toggle (small, bottom-left)
         eye_layout.addStretch(1)
@@ -1222,18 +1413,9 @@ class VREyebrowTrackerGUI(QMainWindow):
         grp_model.setLayout(grp_model_layout)
         settings_panel.addWidget(grp_model)
         
-        # OSC Server & Proxy Group
-        grp_osc = QGroupBox("OSC Output & Filter Proxy")
+        # OSC Group
+        grp_osc = QGroupBox("OSC")
         grp_osc_layout = QVBoxLayout()
-        
-        lbl_osc_instr = QLabel(
-            "AI Output Parameters:\n"
-            "/avatar/parameters/FT/v2/BrowExpression...\n"
-            "/avatar/parameters/FT/v2/BrowInnerUp...\n"
-            "/avatar/parameters/FT/v2/BrowOuterUp..."
-        )
-        lbl_osc_instr.setProperty("class", "muted-label")
-        grp_osc_layout.addWidget(lbl_osc_instr)
         
         port_layout = QHBoxLayout()
         port_layout.addWidget(QLabel("AI Output IP:"))
@@ -1271,39 +1453,6 @@ class VREyebrowTrackerGUI(QMainWindow):
         
         grp_smooth.setLayout(grp_smooth_layout)
         settings_panel.addWidget(grp_smooth)
-
-        # Response Tuning Group
-        grp_tune = QGroupBox("Response Tuning")
-        grp_tune_layout = QVBoxLayout()
-        self.lbl_deadzone = QLabel("Deadzone: 5%")
-        grp_tune_layout.addWidget(self.lbl_deadzone)
-        self.slider_deadzone = QSlider(Qt.Horizontal)
-        self.slider_deadzone.setRange(0, 30)
-        self.slider_deadzone.setValue(5)
-        self.slider_deadzone.valueChanged.connect(lambda v: self.lbl_deadzone.setText(f"Deadzone: {v}%"))
-        self.slider_deadzone.valueChanged.connect(lambda v: self._update_setting("deadzone", v))
-        grp_tune_layout.addWidget(self.slider_deadzone)
-
-        self.lbl_boost_pos = QLabel("Boost +: 100%")
-        grp_tune_layout.addWidget(self.lbl_boost_pos)
-        self.slider_boost_pos = QSlider(Qt.Horizontal)
-        self.slider_boost_pos.setRange(50, 300)
-        self.slider_boost_pos.setValue(100)
-        self.slider_boost_pos.valueChanged.connect(lambda v: self.lbl_boost_pos.setText(f"Boost +: {v}%"))
-        self.slider_boost_pos.valueChanged.connect(lambda v: self._update_setting("boost_pos", v))
-        grp_tune_layout.addWidget(self.slider_boost_pos)
-
-        self.lbl_boost_neg = QLabel("Boost -: 100%")
-        grp_tune_layout.addWidget(self.lbl_boost_neg)
-        self.slider_boost_neg = QSlider(Qt.Horizontal)
-        self.slider_boost_neg.setRange(50, 300)
-        self.slider_boost_neg.setValue(100)
-        self.slider_boost_neg.valueChanged.connect(lambda v: self.lbl_boost_neg.setText(f"Boost -: {v}%"))
-        self.slider_boost_neg.valueChanged.connect(lambda v: self._update_setting("boost_neg", v))
-        grp_tune_layout.addWidget(self.slider_boost_neg)
-
-        grp_tune.setLayout(grp_tune_layout)
-        settings_panel.addWidget(grp_tune)
 
         # Sync Group
         grp_sync = QGroupBox("L/R Synchronization")
@@ -1730,6 +1879,9 @@ class VREyebrowTrackerGUI(QMainWindow):
 
     def toggle_left_connection(self):
         if not self.is_connected_left:
+            if self.use_combined_feed and self.cmb_cam_l.currentData() == "url":
+                QMessageBox.warning(self, "Camera Error", "Select a camera device before starting the stream.")
+                return
             left_source = self._get_camera_source(self.cmb_cam_l, self.txt_cam_l.text())
             if isinstance(left_source, int) and left_source not in self.camera_devices:
                 QMessageBox.warning(self, "Camera Error", f"Left camera index {left_source} not available. Please rescan.")
@@ -1737,11 +1889,11 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.cam_left = CameraThread(left_source)
             self.cam_left.start()
             self.is_connected_left = True
-            self.btn_connect_left.setText("Stop Left Stream")
+            self.btn_connect_left.setText("Stop Stream" if self.use_combined_feed else "Stop Left Stream")
             self.btn_connect_left.setProperty("class", "primary-btn-danger"); self.btn_connect_left.style().unpolish(self.btn_connect_left); self.btn_connect_left.style().polish(self.btn_connect_left)
         else:
             self.is_connected_left = False
-            self.btn_connect_left.setText("Start Left Stream")
+            self.btn_connect_left.setText("Start Stream" if self.use_combined_feed else "Start Left Stream")
             self.btn_connect_left.setProperty("class", "primary-btn"); self.btn_connect_left.style().unpolish(self.btn_connect_left); self.btn_connect_left.style().polish(self.btn_connect_left)
             if self.cam_left: self.cam_left.stop()
             self.left_img_label.clear()
@@ -1874,13 +2026,23 @@ class VREyebrowTrackerGUI(QMainWindow):
             self._show_error_dialog("Capture Error", f"Failed to save calibration frame:\n{e}", key="save_frame")
 
     def start_calibration_sequence(self):
-        if not (self.is_connected_left and self.is_connected_right):
-            QMessageBox.warning(self, "Warning", "Please connect both camera streams first!")
-            return
+        if self.use_combined_feed:
+            if not self.is_connected_left and not self.is_connected_right:
+                QMessageBox.warning(self, "Warning", "Please connect the combined camera stream first!")
+                return
+        else:
+            if not (self.is_connected_left and self.is_connected_right):
+                QMessageBox.warning(self, "Warning", "Please connect both camera streams first!")
+                return
             
-        if self.cam_left is None or self.cam_right is None or getattr(self.cam_left, 'latest_frame', None) is None or getattr(self.cam_right, 'latest_frame', None) is None:
-            QMessageBox.warning(self, "Warning", "No camera frames received! Please check your eye tracking streams.")
-            return
+        if self.use_combined_feed:
+            if (self.cam_left is None and self.cam_right is None):
+                QMessageBox.warning(self, "Warning", "No camera frames received! Please check your eye tracking stream.")
+                return
+        else:
+            if self.cam_left is None or self.cam_right is None or getattr(self.cam_left, 'latest_frame', None) is None or getattr(self.cam_right, 'latest_frame', None) is None:
+                QMessageBox.warning(self, "Warning", "No camera frames received! Please check your eye tracking streams.")
+                return
             
         expressions = [s['name'] for s in self.calib_states if s['target'] is not None]
         msg = "The following expressions will be recorded for 10 seconds each:\n\n"
@@ -1950,18 +2112,17 @@ class VREyebrowTrackerGUI(QMainWindow):
         if self.is_connected:
             frame_l_bgr = getattr(self.cam_left, 'latest_frame', None) if self.is_connected_left else None
             frame_r_bgr = getattr(self.cam_right, 'latest_frame', None) if self.is_connected_right else None
+
+            if self.use_combined_feed:
+                combined = frame_l_bgr if frame_l_bgr is not None else frame_r_bgr
+                combined = self._apply_combined_transform(combined)
+                frame_l_bgr, frame_r_bgr = self._split_combined_frame(combined)
             
             if self.tabs.currentIndex() == 0:
-                if self.is_connected_left and frame_l_bgr is None:
+                if (self.is_connected_left or self.use_combined_feed) and frame_l_bgr is None:
                     self.left_img_label.setText("Left: No Signal")
-                if self.is_connected_right and frame_r_bgr is None:
+                if (self.is_connected_right or self.use_combined_feed) and frame_r_bgr is None:
                     self.right_img_label.setText("Right: No Signal")
-            
-            # 60 FPS Rate Limiter (16.6 ms per frame minimum)
-            if hasattr(self, 'last_render_time'):
-                if (curr_time - self.last_render_time) < (1.0 / 60.0):
-                    return
-            self.last_render_time = curr_time
             
             # Use `is` because cv2.read returns a new numpy array object every frame
             if getattr(self, 'last_frame_l', None) is frame_l_bgr and getattr(self, 'last_frame_r', None) is frame_r_bgr:
@@ -2010,14 +2171,14 @@ class VREyebrowTrackerGUI(QMainWindow):
                         try:
                             gray_l = cv2.cvtColor(frame_l_bgr, cv2.COLOR_BGR2GRAY)
                             h, w = gray_l.shape
-                            self.left_img_label.setPixmap(QPixmap.fromImage(QImage(gray_l.data, w, h, w, QImage.Format_Grayscale8)).scaled(250, 250, Qt.KeepAspectRatio))
+                            self.left_img_label.setPixmap(QPixmap.fromImage(QImage(gray_l.data, w, h, w, QImage.Format_Grayscale8)).scaled(self.left_img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
                         except Exception:
                             pass
                     if frame_r_bgr is not None:
                         try:
                             gray_r = cv2.cvtColor(frame_r_bgr, cv2.COLOR_BGR2GRAY)
                             h, w = gray_r.shape
-                            self.right_img_label.setPixmap(QPixmap.fromImage(QImage(gray_r.data, w, h, w, QImage.Format_Grayscale8)).scaled(250, 250, Qt.KeepAspectRatio))
+                            self.right_img_label.setPixmap(QPixmap.fromImage(QImage(gray_r.data, w, h, w, QImage.Format_Grayscale8)).scaled(self.right_img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
                         except Exception:
                             pass
                 return
@@ -2059,8 +2220,8 @@ class VREyebrowTrackerGUI(QMainWindow):
                 self.lbl_l_fps.setText(fps_text)
                 self.lbl_r_fps.setText(fps_text)
                 
-                self.left_img_label.setPixmap(QPixmap.fromImage(QImage(gray_l.data, w, h, w, QImage.Format_Grayscale8)).scaled(250, 250, Qt.KeepAspectRatio))
-                self.right_img_label.setPixmap(QPixmap.fromImage(QImage(gray_r.data, w, h, w, QImage.Format_Grayscale8)).scaled(250, 250, Qt.KeepAspectRatio))
+                self.left_img_label.setPixmap(QPixmap.fromImage(QImage(gray_l.data, w, h, w, QImage.Format_Grayscale8)).scaled(self.left_img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self.right_img_label.setPixmap(QPixmap.fromImage(QImage(gray_r.data, w, h, w, QImage.Format_Grayscale8)).scaled(self.right_img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
             
             # Decide where the values come from
             if self.chk_manual.isChecked():
@@ -2094,9 +2255,12 @@ class VREyebrowTrackerGUI(QMainWindow):
                     with torch.no_grad():
                         # Eyebrow Regressor
                         if self.use_lr_models:
+                            self.model_left.eval()
+                            self.model_right.eval()
                             out_l_t = torch.clamp(self.model_left(batch[0:1]), -1.0, 1.0)
                             out_r_t = torch.clamp(self.model_right(batch[1:2]), -1.0, 1.0)
                         else:
+                            self.model.eval()
                             out_all = torch.clamp(self.model(batch), -1.0, 1.0)
                             out_l_t = out_all[0:1]
                             out_r_t = out_all[1:2]
@@ -2378,6 +2542,11 @@ class VREyebrowTrackerGUI(QMainWindow):
                     self.values_row_widget.set_data(ordered_vals)
         if hasattr(self, "graph_stack"):
             self.graph_stack.setCurrentIndex(1 if self.osc_debug_enabled else 0)
+        if hasattr(self, "graph_stack_widget"):
+            if self.osc_debug_enabled:
+                self.graph_stack_widget.setMaximumHeight(16777215)
+            else:
+                self.graph_stack_widget.setMaximumHeight(220)
 
     def _toggle_lr_models(self, state):
         self.use_lr_models = (state == Qt.Checked)
@@ -2465,8 +2634,32 @@ class VREyebrowTrackerGUI(QMainWindow):
         super().closeEvent(event)
 
 if __name__ == '__main__':
-    if hasattr(Qt, 'AA_EnableHighDpiScaling'): QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    app = QApplication(sys.argv)
-    ex = VREyebrowTrackerGUI()
-    ex.show()
-    sys.exit(app.exec_())
+    log_path = None
+    try:
+        appdata = os.getenv("APPDATA")
+        if appdata:
+            log_dir = Path(appdata) / "VREyebrowTracker"
+        else:
+            log_dir = Path("data")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "gui_startup.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"--- GUI start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        if hasattr(Qt, 'AA_EnableHighDpiScaling'):
+            QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        app = QApplication(sys.argv)
+        ex = VREyebrowTrackerGUI()
+        ex.show()
+        sys.exit(app.exec_())
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            if log_path:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"[FATAL] {e}\n{tb}\n")
+        except Exception:
+            pass
+        print(f"[FATAL] GUI failed to start: {e}")
+        traceback.print_exc()
+        input("Press Enter to exit...")
