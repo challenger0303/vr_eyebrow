@@ -604,6 +604,19 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.ema_inner_right = EMARegressor(alpha=0.3)
         self.ema_outer_left = EMARegressor(alpha=0.3)
         self.ema_outer_right = EMARegressor(alpha=0.3)
+        self.sym_offset_l = 0.0
+        self.sym_offset_r = 0.0
+        self.sym_scale_l = 1.0
+        self.sym_scale_r = 1.0
+        self.sym_calibrating = False
+        self.sym_phase_idx = 0
+        self.sym_phase_start = 0.0
+        self.sym_samples_l = []
+        self.sym_samples_r = []
+        self.sym_phase_results = {}
+        self.sym_phases = [("Neutral", 2.0), ("Max Up", 2.0), ("Max Down", 2.0)]
+        self.last_raw_brow_l = None
+        self.last_raw_brow_r = None
         
         self.offset_l = 0.0
         self.offset_r = 0.0
@@ -685,6 +698,8 @@ class VREyebrowTrackerGUI(QMainWindow):
         # UI & Timer
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_frame)
+        self.sym_timer = QTimer(self)
+        self.sym_timer.timeout.connect(self._tick_symmetry_calibration)
         
         self.init_ui()
         self.apply_theme()
@@ -961,6 +976,14 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.chk_auto_baseline.setChecked(bool(s["auto_baseline"]))
         if "alpha" in s:
             self.slider_alpha.setValue(int(s["alpha"]))
+        if "sym_offset_l" in s:
+            self.sym_offset_l = float(s["sym_offset_l"])
+        if "sym_offset_r" in s:
+            self.sym_offset_r = float(s["sym_offset_r"])
+        if "sym_scale_l" in s:
+            self.sym_scale_l = float(s["sym_scale_l"])
+        if "sym_scale_r" in s:
+            self.sym_scale_r = float(s["sym_scale_r"])
         if "device_index" in s and isinstance(s["device_index"], int):
             idx = s["device_index"]
             if 0 <= idx < self.cmb_device.count():
@@ -1466,6 +1489,11 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.slider_sync.valueChanged.connect(lambda v: self.lbl_sync_val.setText(f"Sync: {v}%"))
         self.slider_sync.valueChanged.connect(lambda v: self._update_setting("sync", v))
         grp_sync_layout.addWidget(self.slider_sync)
+
+        self.btn_sym_calib = QPushButton("Auto Symmetry Calibrate")
+        self.btn_sym_calib.setToolTip("Align L/R amplitude by holding Neutral, Max Up, Max Down for 2s each.")
+        self.btn_sym_calib.clicked.connect(self.start_symmetry_calibration)
+        grp_sync_layout.addWidget(self.btn_sym_calib)
         
         grp_sync.setLayout(grp_sync_layout)
         settings_panel.addWidget(grp_sync)
@@ -1499,7 +1527,6 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.btn_reset_offsets = QPushButton("Reset Offsets (Zero)")
         self.btn_reset_offsets.setToolTip("Force offsets to 0.0 for both eyes.")
         self.btn_reset_offsets.clicked.connect(self.reset_offsets_zero)
-        
         self.lbl_auto_status = QLabel("Status: Waiting for stable neutral frame...")
         self.lbl_auto_status.setStyleSheet("color: #888;")
         
@@ -1809,6 +1836,98 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.offset_r = 0.0
         self.auto_offset_l = 0.0
         self.auto_offset_r = 0.0
+
+    def start_symmetry_calibration(self):
+        if self.sym_calibrating:
+            return
+        if self.last_raw_brow_l is None or self.last_raw_brow_r is None:
+            self._show_error_dialog("Warning", "No tracking data yet.\nStart the streams and wait for values before symmetry calibration.")
+            return
+        self.sym_calibrating = True
+        self.sym_phase_idx = 0
+        self.sym_phase_results = {}
+        self.sym_samples_l = []
+        self.sym_samples_r = []
+        self.sym_phase_start = time.time()
+        if hasattr(self, "btn_sym_calib"):
+            self.btn_sym_calib.setEnabled(False)
+        phase_name, duration = self.sym_phases[self.sym_phase_idx]
+        self.lbl_auto_status.setText(f"Symmetry Calib: {phase_name} ({duration:.1f}s)")
+        self.lbl_auto_status.setStyleSheet("color: #eb9534;")
+        self.sym_timer.start(100)
+
+    def _tick_symmetry_calibration(self):
+        if not self.sym_calibrating:
+            return
+        if self.last_raw_brow_l is None or self.last_raw_brow_r is None:
+            return
+        self.sym_samples_l.append(self.last_raw_brow_l)
+        self.sym_samples_r.append(self.last_raw_brow_r)
+        phase_name, duration = self.sym_phases[self.sym_phase_idx]
+        if (time.time() - self.sym_phase_start) >= duration:
+            if len(self.sym_samples_l) == 0 or len(self.sym_samples_r) == 0:
+                self._finish_symmetry_calibration(error="No samples collected. Try again.")
+                return
+            mean_l = sum(self.sym_samples_l) / len(self.sym_samples_l)
+            mean_r = sum(self.sym_samples_r) / len(self.sym_samples_r)
+            self.sym_phase_results[phase_name] = (mean_l, mean_r)
+            self.sym_phase_idx += 1
+            if self.sym_phase_idx >= len(self.sym_phases):
+                self._finish_symmetry_calibration()
+                return
+            self.sym_samples_l = []
+            self.sym_samples_r = []
+            self.sym_phase_start = time.time()
+            next_name, next_dur = self.sym_phases[self.sym_phase_idx]
+            self.lbl_auto_status.setText(f"Symmetry Calib: {next_name} ({next_dur:.1f}s)")
+
+    def _finish_symmetry_calibration(self, error=None):
+        self.sym_timer.stop()
+        self.sym_calibrating = False
+        if hasattr(self, "btn_sym_calib"):
+            self.btn_sym_calib.setEnabled(True)
+        if error:
+            self.lbl_auto_status.setText(f"Symmetry Calib: {error}")
+            self.lbl_auto_status.setStyleSheet("color: #d9534f;")
+            return
+        needed = {"Neutral", "Max Up", "Max Down"}
+        if not needed.issubset(self.sym_phase_results.keys()):
+            self.lbl_auto_status.setText("Symmetry Calib: Missing phases. Try again.")
+            self.lbl_auto_status.setStyleSheet("color: #d9534f;")
+            return
+        n_l, n_r = self.sym_phase_results["Neutral"]
+        up_l, up_r = self.sym_phase_results["Max Up"]
+        down_l, down_r = self.sym_phase_results["Max Down"]
+
+        def _range(neutral, up, down):
+            up_delta = up - neutral
+            down_delta = neutral - down
+            return max(abs(up_delta), abs(down_delta))
+
+        range_l = _range(n_l, up_l, down_l)
+        range_r = _range(n_r, up_r, down_r)
+        if range_l < 0.02 or range_r < 0.02:
+            self.lbl_auto_status.setText("Symmetry Calib: Not enough movement. Try again.")
+            self.lbl_auto_status.setStyleSheet("color: #d9534f;")
+            return
+        avg_range = (range_l + range_r) / 2.0
+        eps = 1e-6
+        scale_l = avg_range / max(range_l, eps)
+        scale_r = avg_range / max(range_r, eps)
+        scale_l = max(0.33, min(3.0, scale_l))
+        scale_r = max(0.33, min(3.0, scale_r))
+
+        self.sym_offset_l = n_l
+        self.sym_offset_r = n_r
+        self.sym_scale_l = scale_l
+        self.sym_scale_r = scale_r
+        self._update_setting("sym_offset_l", self.sym_offset_l)
+        self._update_setting("sym_offset_r", self.sym_offset_r)
+        self._update_setting("sym_scale_l", self.sym_scale_l)
+        self._update_setting("sym_scale_r", self.sym_scale_r)
+
+        self.lbl_auto_status.setText(f"Symmetry Calib Done: L x{scale_l:.2f}, R x{scale_r:.2f}")
+        self.lbl_auto_status.setStyleSheet("color: #4CAF50;")
         self.brow_history_l.clear()
         self.brow_history_r.clear()
         self.lbl_auto_status.setText("Status: Offsets reset to 0.0")
@@ -2341,6 +2460,17 @@ class VREyebrowTrackerGUI(QMainWindow):
                         raw_brow_l -= self.auto_offset_l
                         raw_brow_r -= self.auto_offset_r
                     
+                    self.last_raw_brow_l = raw_brow_l
+                    self.last_raw_brow_r = raw_brow_r
+
+                    # Apply symmetry calibration (offset + scale)
+                    raw_brow_l = (raw_brow_l - self.sym_offset_l) * self.sym_scale_l
+                    raw_brow_r = (raw_brow_r - self.sym_offset_r) * self.sym_scale_r
+                    raw_inner_l = (raw_inner_l - self.sym_offset_l) * self.sym_scale_l
+                    raw_inner_r = (raw_inner_r - self.sym_offset_r) * self.sym_scale_r
+                    raw_outer_l = (raw_outer_l - self.sym_offset_l) * self.sym_scale_l
+                    raw_outer_r = (raw_outer_r - self.sym_offset_r) * self.sym_scale_r
+
                     # Apply standard Static Offsets and EMA Filter
                     alpha = max(0.01, 1.0 - (self.slider_smooth.value() / 100.0))
                     self.ema_left.alpha = alpha
