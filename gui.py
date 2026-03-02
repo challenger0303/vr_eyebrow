@@ -2,6 +2,10 @@ import sys
 import os
 import platform
 import winreg
+
+APP_VERSION = "0.0.0"
+GITHUB_REPO = "challenger0303/vr_eyebrow"
+GITHUB_USER_AGENT = "VREyebrowTracker"
 import time
 import re
 os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
@@ -18,7 +22,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QPushButton, QCheckBox, 
                              QLineEdit, QFrame, QGroupBox, QStyleFactory, QTabWidget, 
                              QProgressBar, QFileDialog, QMessageBox, QSlider, QTableWidget, QTableWidgetItem, QHeaderView,
-                             QScrollArea, QGridLayout, QComboBox, QTextEdit, QPlainTextEdit, QStackedLayout, QSizePolicy)
+                             QScrollArea, QGridLayout, QComboBox, QTextEdit, QPlainTextEdit, QStackedLayout, QSizePolicy, QInputDialog)
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor, QPainter, QPen, QBrush, QTextCursor
 from torchvision import transforms
@@ -673,6 +677,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.use_combined_feed = False
         self.combined_rotate = 0
         self.hmd_profile = "DIY"
+        self.gh_token = os.getenv("VREYEBROW_GH_TOKEN", "").strip()
         
         if self.csv_path.exists():
             try:
@@ -847,6 +852,158 @@ class VREyebrowTrackerGUI(QMainWindow):
                 if len(self.camera_devices) == 1:
                     self._set_camera_combo(self.cmb_cam_l, self.camera_devices[0])
 
+    def _get_github_token(self):
+        token = os.getenv("VREYEBROW_GH_TOKEN", "").strip()
+        if token:
+            self.gh_token = token
+            return token
+        if self.gh_token:
+            return self.gh_token
+        token, ok = QInputDialog.getText(
+            self,
+            "GitHub Token Required",
+            "Enter GitHub token (repo access) for updates:",
+            QLineEdit.Password,
+        )
+        if ok and token.strip():
+            self.gh_token = token.strip()
+            self._update_setting("gh_token", self.gh_token)
+            return self.gh_token
+        return ""
+
+    def set_github_token(self):
+        token, ok = QInputDialog.getText(
+            self,
+            "Set GitHub Token",
+            "Enter GitHub token (repo access) for updates:",
+            QLineEdit.Password,
+            self.gh_token or "",
+        )
+        if ok:
+            self.gh_token = token.strip()
+            self._update_setting("gh_token", self.gh_token)
+
+    def _parse_version(self, tag):
+        if not tag:
+            return None
+        m = re.search(r"(\\d+)\\.(\\d+)\\.(\\d+)", str(tag))
+        if not m:
+            return None
+        return tuple(int(x) for x in m.groups())
+
+    def _is_newer_version(self, latest_tag):
+        current = self._parse_version(APP_VERSION)
+        latest = self._parse_version(latest_tag)
+        if current is None or latest is None:
+            return str(latest_tag) != str(APP_VERSION)
+        return latest > current
+
+    def _select_update_asset(self, assets):
+        if not assets:
+            return None
+        preferred = ["gui.exe", "vreyebrowtracker.exe", "VREyebrowTracker.exe"]
+        for name in preferred:
+            for a in assets:
+                if str(a.get("name", "")).lower() == name.lower():
+                    return a
+        for a in assets:
+            if str(a.get("name", "")).lower().endswith(".exe"):
+                return a
+        return None
+
+    def check_for_updates(self):
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(self, "Update", "Update check is available only in the built .exe.")
+            return
+        token = self._get_github_token()
+        if not token:
+            QMessageBox.warning(self, "Update", "GitHub token is required for private repo updates.")
+            return
+        api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        try:
+            resp = requests.get(
+                api_url,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"token {token}",
+                    "User-Agent": GITHUB_USER_AGENT,
+                },
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"GitHub API error: {resp.status_code}")
+            data = resp.json()
+        except Exception as e:
+            self._show_error_dialog("Update Error", f"Failed to check updates:\n{e}", key="update_check")
+            return
+
+        latest_tag = data.get("tag_name") or data.get("name") or ""
+        assets = data.get("assets", [])
+        if not latest_tag:
+            QMessageBox.warning(self, "Update", "Could not determine latest version.")
+            return
+        if not self._is_newer_version(latest_tag):
+            QMessageBox.information(self, "Update", f"You're up to date. (Current: {APP_VERSION})")
+            return
+        msg = f"Update available: {latest_tag}\nCurrent: {APP_VERSION}\n\nDownload and install now?"
+        if QMessageBox.question(self, "Update Available", msg) != QMessageBox.Yes:
+            return
+        asset = self._select_update_asset(assets)
+        if not asset:
+            QMessageBox.warning(self, "Update", "No suitable .exe asset found in the latest release.")
+            return
+        try:
+            self._download_and_install_update(asset, token)
+        except Exception as e:
+            self._show_error_dialog("Update Error", f"Failed to update:\n{e}", key="update_apply")
+
+    def _download_and_install_update(self, asset, token):
+        exe_path = Path(sys.executable)
+        exe_dir = exe_path.parent
+        new_path = exe_dir / f"{exe_path.stem}.update.exe"
+        asset_url = asset.get("url")
+        if not asset_url:
+            raise RuntimeError("Missing asset download URL.")
+
+        with requests.get(
+            asset_url,
+            headers={
+                "Accept": "application/octet-stream",
+                "Authorization": f"token {token}",
+                "User-Agent": GITHUB_USER_AGENT,
+            },
+            stream=True,
+            timeout=60,
+        ) as r:
+            if r.status_code != 200:
+                raise RuntimeError(f"Download failed: {r.status_code}")
+            with open(new_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+        bat_path = exe_dir / "update_gui.bat"
+        bat = [
+            "@echo off",
+            "setlocal",
+            "timeout /t 1 /nobreak >nul",
+            ":wait",
+            f"tasklist | find /i \"{exe_path.name}\" >nul",
+            "if not errorlevel 1 (",
+            "  timeout /t 1 /nobreak >nul",
+            "  goto wait",
+            ")",
+            f"move /y \"{new_path}\" \"{exe_path}\" >nul",
+            f"start \"\" \"{exe_path}\"",
+            "del \"%~f0\"",
+        ]
+        with open(bat_path, "w", encoding="utf-8") as f:
+            f.write("\r\n".join(bat))
+
+        subprocess.Popen(["cmd", "/c", str(bat_path)], creationflags=subprocess.CREATE_NO_WINDOW)
+        QMessageBox.information(self, "Update", "Update is ready. The app will now restart.")
+        QApplication.quit()
+
     def _toggle_combined_feed(self, state):
         self.use_combined_feed = (state == Qt.Checked)
 
@@ -976,6 +1133,8 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.chk_auto_baseline.setChecked(bool(s["auto_baseline"]))
         if "alpha" in s:
             self.slider_alpha.setValue(int(s["alpha"]))
+        if "gh_token" in s and not self.gh_token:
+            self.gh_token = str(s["gh_token"])
         if "sym_offset_l" in s:
             self.sym_offset_l = float(s["sym_offset_l"])
         if "sym_offset_r" in s:
@@ -1087,21 +1246,36 @@ class VREyebrowTrackerGUI(QMainWindow):
         
         # Top Bar (Connection)
         top_bar = QHBoxLayout()
-        self.btn_connect_left = QPushButton("Start Left Stream")
-        self.btn_connect_left.setProperty("class", "primary-btn")
-        self.btn_connect_left.clicked.connect(self.toggle_left_connection)
-        top_bar.addWidget(self.btn_connect_left)
-        
-        self.btn_connect_right = QPushButton("Start Right Stream")
-        self.btn_connect_right.setProperty("class", "primary-btn")
-        self.btn_connect_right.clicked.connect(self.toggle_right_connection)
-        top_bar.addWidget(self.btn_connect_right)
+        top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.setSpacing(8)
+        update_widget = QWidget()
+        update_layout = QHBoxLayout(update_widget)
+        update_layout.setContentsMargins(0, 0, 0, 0)
+        update_layout.setSpacing(2)
+        self.lbl_version = QLabel(f"v{APP_VERSION}")
+        self.lbl_version.setProperty("class", "muted-label")
+        self.btn_check_updates = QPushButton("Update")
+        self.btn_check_updates.clicked.connect(self.check_for_updates)
+        self.btn_set_token = QPushButton("Token")
+        self.btn_set_token.clicked.connect(self.set_github_token)
+        update_layout.addWidget(self.lbl_version)
+        update_layout.addWidget(self.btn_check_updates)
+        update_layout.addWidget(self.btn_set_token)
+        for b in (self.btn_check_updates, self.btn_set_token):
+            b.setFixedHeight(24)
+            b.setFixedWidth(64)
+        update_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        top_bar.addWidget(update_widget)
+        top_bar.addStretch(1)
 
-        theme_hmd_col = QVBoxLayout()
+        theme_hmd_row = QHBoxLayout()
+        theme_hmd_row.setContentsMargins(0, 0, 0, 0)
+        theme_hmd_row.setSpacing(6)
         self.btn_theme = QPushButton("Light Mode")
         self.btn_theme.setProperty("class", "theme-btn")
         self.btn_theme.clicked.connect(self.toggle_theme)
-        theme_hmd_col.addWidget(self.btn_theme)
+        self.btn_theme.setFixedWidth(220)
+        theme_hmd_row.addWidget(self.btn_theme)
 
         self.cmb_hmd = QComboBox()
         self.cmb_hmd.addItem("Pimax Crystal / Super QLED")
@@ -1113,9 +1287,10 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.cmb_hmd.addItem("Bigscreen Beyond 2e")
         self.cmb_hmd.addItem("DIY")
         self.cmb_hmd.currentIndexChanged.connect(self._on_hmd_changed)
-        theme_hmd_col.addWidget(self.cmb_hmd)
-
-        top_bar.addLayout(theme_hmd_col)
+        self.cmb_hmd.setFixedWidth(220)
+        theme_hmd_row.addWidget(self.cmb_hmd)
+        top_bar.addLayout(theme_hmd_row, stretch=0)
+        top_bar.setAlignment(theme_hmd_row, Qt.AlignRight)
 
         
         main_layout.addLayout(top_bar)
@@ -1181,6 +1356,10 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.left_img_label.setFixedSize(220, 220)
         self.left_img_label.setProperty("class", "cam-label")
         self.left_img_label.setAlignment(Qt.AlignCenter)
+
+        self.btn_connect_left = QPushButton("Start Left Stream")
+        self.btn_connect_left.setProperty("class", "primary-btn")
+        self.btn_connect_left.clicked.connect(self.toggle_left_connection)
         
         lbl_l = QLabel("Left Eye")
         lbl_l.setAlignment(Qt.AlignCenter)
@@ -1201,6 +1380,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.left_eye_box.addWidget(top_left_widget)
         self.left_eye_box.addLayout(cam_l_row)
         self.left_eye_box.addWidget(self.left_img_label)
+        self.left_eye_box.addWidget(self.btn_connect_left)
         self.left_eye_box.addWidget(lbl_l)
         self.left_eye_box.addWidget(self.lbl_l_brow)
         
@@ -1240,6 +1420,10 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.right_img_label.setFixedSize(220, 220)
         self.right_img_label.setProperty("class", "cam-label")
         self.right_img_label.setAlignment(Qt.AlignCenter)
+
+        self.btn_connect_right = QPushButton("Start Right Stream")
+        self.btn_connect_right.setProperty("class", "primary-btn")
+        self.btn_connect_right.clicked.connect(self.toggle_right_connection)
         
         lbl_r = QLabel("Right Eye")
         lbl_r.setAlignment(Qt.AlignCenter)
@@ -1262,6 +1446,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.right_eye_box.addWidget(top_right_widget)
         self.right_eye_box.addLayout(cam_r_row)
         self.right_eye_box.addWidget(self.right_img_label)
+        self.right_eye_box.addWidget(self.btn_connect_right)
         self.right_eye_box.addWidget(lbl_r)
         self.right_eye_box.addWidget(self.lbl_r_brow)
         
@@ -1420,7 +1605,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         grp_device_layout.addWidget(self.cmb_device)
         grp_device.setLayout(grp_device_layout)
         settings_panel.addWidget(grp_device)
-        
+
         # Model Selection Group
         grp_model = QGroupBox("Model Configuration")
         grp_model_layout = QVBoxLayout()

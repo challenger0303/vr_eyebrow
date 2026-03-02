@@ -1,9 +1,49 @@
 import PyInstaller.__main__
 import os
+import re
 import shutil
+from pathlib import Path
+
+VERSION_FILE = "VERSION.txt"
+GUI_FILE = "gui.py"
+VERSION_RE = re.compile(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']')
+
+def _read_version():
+    env_ver = os.getenv("VREYEBROW_VERSION", "").strip()
+    if env_ver:
+        return env_ver
+    if os.path.exists(VERSION_FILE):
+        with open(VERSION_FILE, "r", encoding="utf-8") as f:
+            ver = f.read().strip()
+            if ver:
+                return ver
+    return "0.0.0"
+
+def _set_gui_version(version):
+    if not os.path.exists(GUI_FILE):
+        return False
+    path = Path(GUI_FILE)
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    changed = False
+    for i, line in enumerate(lines):
+        if VERSION_RE.match(line.strip()):
+            lines[i] = f'APP_VERSION = "{version}"'
+            changed = True
+            break
+    if not changed:
+        return False
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return True
 
 def build_executable():
     print("Preparing to build VR Eyebrow Tracker executable...")
+
+    version = _read_version()
+    if _set_gui_version(version):
+        print(f"Set APP_VERSION to {version}")
+    else:
+        print("Warning: Failed to set APP_VERSION in gui.py")
     
     # 1. Clean previous builds
     if os.path.exists("build"):
