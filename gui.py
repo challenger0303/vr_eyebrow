@@ -972,7 +972,11 @@ class VREyebrowTrackerGUI(QMainWindow):
             return
         asset = self._select_update_asset(assets)
         if not asset:
-            QMessageBox.warning(self, "Update", "No suitable .exe asset found in the latest release.")
+            names = [a.get("name", "") for a in assets] if assets else []
+            if names:
+                QMessageBox.warning(self, "Update", "No suitable .exe asset found.\nAssets:\n" + "\n".join(names))
+            else:
+                QMessageBox.warning(self, "Update", "No release assets found in the latest release.")
             return
         try:
             self._download_and_install_update(asset, token)
