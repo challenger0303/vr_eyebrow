@@ -346,7 +346,7 @@ class CameraThread(QThread):
 
 
 class CameraScanThread(QThread):
-    result = pyqtSignal(list)
+    result = pyqtSignal(list, list)
     error = pyqtSignal(str)
 
     def __init__(self, max_index=4, parent=None):
@@ -362,7 +362,18 @@ class CameraScanThread(QThread):
                     available.append(i)
                 if cap is not None:
                     cap.release()
-            self.result.emit(available)
+            names = []
+            try:
+                cmd = "Get-PnpDevice -Class Camera | Select-Object -ExpandProperty FriendlyName"
+                result = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True)
+                names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                if not names:
+                    cmd = "Get-PnpDevice -Class Image | Select-Object -ExpandProperty FriendlyName"
+                    result = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True)
+                    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            except Exception:
+                names = []
+            self.result.emit(available, names)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -1073,9 +1084,9 @@ class VREyebrowTrackerGUI(QMainWindow):
         self._camera_scan_thread.error.connect(self._handle_camera_scan_error)
         self._camera_scan_thread.start()
 
-    def _apply_camera_scan(self, devices):
+    def _apply_camera_scan(self, devices, names):
         self.camera_devices = list(devices)
-        self.camera_friendly_names = self._get_camera_friendly_names()
+        self.camera_friendly_names = list(names) if names else []
         use_names = len(self.camera_friendly_names) == len(self.camera_devices)
         left_sel = self.cmb_cam_l.currentData()
         right_sel = self.cmb_cam_r.currentData()
