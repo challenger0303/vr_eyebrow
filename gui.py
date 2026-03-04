@@ -249,6 +249,10 @@ class CameraThread(QThread):
         self.running = True
         self.latest_frame = None  # Store numpy array directly instead of raw bytes
         self.cap = None
+        self.fps = 0.0
+        self._last_ts = None
+        self._fps_count = 0
+        self._fps_start = None
 
     def run(self):
         print(f"Starting native OpenCV stream parser for: {self.source}")
@@ -279,6 +283,18 @@ class CameraThread(QThread):
                     if ret and frame is not None:
                         # OpenCV provides BGR numpy array natively
                         self.latest_frame = frame
+                        now = time.time()
+                        if self._fps_start is None:
+                            self._fps_start = now
+                            self._fps_count = 0
+                        self._fps_count += 1
+                        if (now - self._fps_start) >= 0.5:
+                            dt = now - self._fps_start
+                            if dt > 0:
+                                self.fps = self._fps_count / dt
+                            self._fps_start = now
+                            self._fps_count = 0
+                        self._last_ts = now
                         fail_count = 0
                     else:
                         print(f"Frame fetch warning for {self.source}")
@@ -921,18 +937,24 @@ class VREyebrowTrackerGUI(QMainWindow):
             return
         api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
         try:
-            resp = requests.get(
-                api_url,
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": f"token {token}",
-                    "User-Agent": GITHUB_USER_AGENT,
-                },
-                timeout=20,
-            )
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"token {token}",
+                "User-Agent": GITHUB_USER_AGENT,
+            }
+            resp = requests.get(api_url, headers=headers, timeout=20)
+            if resp.status_code == 404:
+                # No "latest" (no releases) in private repos -> fallback to list
+                list_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=1"
+                resp = requests.get(list_url, headers=headers, timeout=20)
+            if resp.status_code == 401 or resp.status_code == 403:
+                raise RuntimeError("Unauthorized. Token may be missing 'repo' scope.")
             if resp.status_code != 200:
                 raise RuntimeError(f"GitHub API error: {resp.status_code}")
             data = resp.json()
+            # If list endpoint was used, take first release
+            if isinstance(data, list):
+                data = data[0] if data else {}
         except Exception as e:
             self._show_error_dialog("Update Error", f"Failed to check updates:\n{e}", key="update_check")
             return
@@ -2520,9 +2542,10 @@ class VREyebrowTrackerGUI(QMainWindow):
                 # Displays (Always update visuals)
                 h, w = gray_l.shape
                 
-                fps_text = f"Capture FPS: {int(self.current_fps)}"
-                self.lbl_l_fps.setText(fps_text)
-                self.lbl_r_fps.setText(fps_text)
+                fps_l = int(getattr(self.cam_left, "fps", 0.0)) if self.is_connected_left or self.use_combined_feed else 0
+                fps_r = int(getattr(self.cam_right, "fps", 0.0)) if self.is_connected_right else 0
+                self.lbl_l_fps.setText(f"Camera FPS: {fps_l}")
+                self.lbl_r_fps.setText(f"Camera FPS: {fps_r}")
                 
                 self.left_img_label.setPixmap(QPixmap.fromImage(QImage(gray_l.data, w, h, w, QImage.Format_Grayscale8)).scaled(self.left_img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 self.right_img_label.setPixmap(QPixmap.fromImage(QImage(gray_r.data, w, h, w, QImage.Format_Grayscale8)).scaled(self.right_img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
