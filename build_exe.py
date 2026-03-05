@@ -21,7 +21,7 @@ def _read_version():
 
 def _set_gui_version(version):
     if not os.path.exists(GUI_FILE):
-        return False
+        return False, ""
     path = Path(GUI_FILE)
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -32,15 +32,16 @@ def _set_gui_version(version):
             changed = True
             break
     if not changed:
-        return False
+        return False, text
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return True
+    return True, text
 
 def build_executable():
     print("Preparing to build VR Eyebrow Tracker executable...")
 
     version = _read_version()
-    if _set_gui_version(version):
+    updated, original_text = _set_gui_version(version)
+    if updated:
         print(f"Set APP_VERSION to {version}")
     else:
         print("Warning: Failed to set APP_VERSION in gui.py")
@@ -54,13 +55,14 @@ def build_executable():
     print("Running PyInstaller...")
     
     # PyInstaller Arguments
-    PyInstaller.__main__.run([
-        'inference.py',
-        '--name=VREyebrowTracker',
-        '--onefile',                   # Package into a single .exe
-        '--windowed',                  # Do not open a background terminal window
-        '--icon=NONE',                 # (Optional: specify an .ico file path here later)
-        '--log-level=WARN',            # Reduce noise; set DEBUG to diagnose issues
+    try:
+        PyInstaller.__main__.run([
+            'inference.py',
+            '--name=VREyebrowTracker',
+            '--onefile',                   # Package into a single .exe
+            '--windowed',                  # Do not open a background terminal window
+            '--icon=NONE',                 # (Optional: specify an .ico file path here later)
+            '--log-level=WARN',            # Reduce noise; set DEBUG to diagnose issues
 
         # PyTorch often needs these hidden imports explicitly declared
         '--hidden-import=torch',
@@ -87,8 +89,12 @@ def build_executable():
         '--exclude-module=setuptools',
         '--exclude-module=torch._dynamo',
         '--exclude-module=torch.distributed',
-        '--exclude-module=torch.testing',
-    ])
+            '--exclude-module=torch.testing',
+        ])
+    finally:
+        if updated and original_text:
+            Path(GUI_FILE).write_text(original_text, encoding="utf-8")
+            print("Restored APP_VERSION in gui.py")
     
     print("\n===============================")
     print("Build Complete!")
