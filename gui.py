@@ -3,7 +3,37 @@ import os
 import platform
 import winreg
 
-APP_VERSION = "0.0.0"
+APP_VERSION = "1.0.0"
+
+def _load_version_override():
+    candidates = []
+    try:
+        exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else None
+        if exe_dir:
+            candidates.append(exe_dir / "VERSION.txt")
+        if hasattr(sys, "_MEIPASS"):
+            candidates.append(Path(sys._MEIPASS) / "VERSION.txt")
+    except Exception:
+        pass
+    try:
+        candidates.append(Path(__file__).resolve().parent / "VERSION.txt")
+        if exe_dir:
+            candidates.append(exe_dir / "_internal" / "VERSION.txt")
+    except Exception:
+        pass
+    for p in candidates:
+        try:
+            if p and p.exists():
+                ver = p.read_text(encoding="utf-8").strip()
+                if ver:
+                    return ver
+        except Exception:
+            continue
+    return None
+
+_ver_override = _load_version_override()
+if _ver_override:
+    APP_VERSION = _ver_override
 GITHUB_REPO = "challenger0303/vr_eyebrow"
 GITHUB_USER_AGENT = "VREyebrowTracker"
 import time
