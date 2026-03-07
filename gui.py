@@ -34,6 +34,26 @@ def _load_version_override():
 _ver_override = _load_version_override()
 if _ver_override:
     APP_VERSION = _ver_override
+
+def _ensure_torch_dll_path():
+    try:
+        if os.name != "nt":
+            return
+        base = None
+        if getattr(sys, "frozen", False):
+            if hasattr(sys, "_MEIPASS"):
+                base = Path(sys._MEIPASS)
+            else:
+                base = Path(sys.executable).parent / "_internal"
+        else:
+            base = Path(__file__).resolve().parent
+        torch_lib = base / "torch" / "lib"
+        if torch_lib.exists():
+            os.add_dll_directory(str(torch_lib))
+    except Exception:
+        pass
+
+_ensure_torch_dll_path()
 GITHUB_REPO = "challenger0303/vr_eyebrow"
 GITHUB_USER_AGENT = "VREyebrowTracker"
 import time

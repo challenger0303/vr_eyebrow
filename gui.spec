@@ -1,5 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
+import os
+
+def add_runtime_dll(name):
+    sys_root = os.environ.get("SystemRoot", r"C:\Windows")
+    path = os.path.join(sys_root, "System32", name)
+    if os.path.exists(path):
+        return (path, ".")
+    return None
 
 datas = []
 binaries = []
@@ -17,6 +25,20 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('requests')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 datas += [('VERSION.txt', '.'), ('VERSION.txt', '_internal')]
+
+for dll in [
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "msvcp140_2.dll",
+    "concrt140.dll",
+    "vcomp140.dll",
+    "vcomp140_1.dll",
+]:
+    item = add_runtime_dll(dll)
+    if item:
+        binaries.append(item)
 
 
 a = Analysis(
@@ -43,7 +65,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -56,7 +78,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='gui',
 )
