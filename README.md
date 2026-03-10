@@ -50,3 +50,18 @@ Extract these videos into individual frames and log their corresponding `Target 
    python inference.py
    ```
    *Note: In `inference.py`, there is a commented out line showing where to hook up the output to a Python OSC library (`python-osc`) to send the smoothed prediction directly to VRChat.*
+
+## GUI Calibration Types
+
+The GUI currently exposes three different "calibration" ideas. They solve different problems:
+
+1. **Dataset Capture & Training**: Records labeled expression frames such as Neutral, Brows Up, Frown, Sad Inner, and Smile Outer. This is offline data collection for model baking, not live recentering.
+2. **Recenter Neutral / Auto-Baseline**: Adjusts the live resting point after the headset shifts. Use `Recenter Neutral Now` for a one-shot reset, or enable auto-baseline if you want the rest pose to drift slowly while your face stays still.
+3. **L/R Output Matching**: Samples Neutral, Max Up, and Max Down from the current live tracker, then rescales left/right output so both sides have similar amplitude.
+
+Recommended order in the app:
+
+1. Capture training data and bake a model.
+2. Start live tracking.
+3. Recenter neutral if the headset has moved.
+4. Run L/R output matching if one side is consistently stronger than the other.

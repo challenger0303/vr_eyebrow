@@ -1388,7 +1388,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.tab_calibration = QWidget()
         self.tab_console = QWidget()
         self.tabs.addTab(self.tab_tracker, "1. Live Tracker & OSC")
-        self.tabs.addTab(self.tab_calibration, "2. Calibration & Training")
+        self.tabs.addTab(self.tab_calibration, "2. Dataset Capture & Training")
         self.tabs.addTab(self.tab_console, "3. Console")
         main_layout.addWidget(self.tabs)
         
@@ -1750,7 +1750,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         settings_panel.addWidget(grp_smooth)
 
         # Sync Group
-        grp_sync = QGroupBox("L/R Synchronization")
+        grp_sync = QGroupBox("L/R Output Matching")
         grp_sync_layout =QVBoxLayout()
         self.lbl_sync_val = QLabel("Sync: 0%")
         grp_sync_layout.addWidget(self.lbl_sync_val)
@@ -1762,8 +1762,11 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.slider_sync.valueChanged.connect(lambda v: self._update_setting("sync", v))
         grp_sync_layout.addWidget(self.slider_sync)
 
-        self.btn_sym_calib = QPushButton("Auto Symmetry Calibrate")
-        self.btn_sym_calib.setToolTip("Align L/R amplitude by holding Neutral, Max Up, Max Down for 2s each.")
+        self.btn_sym_calib = QPushButton("Auto Symmetry Match")
+        self.btn_sym_calib.setToolTip(
+            "Sample Neutral, Max Up, and Max Down for 2s each, then scale left/right "
+            "output to match."
+        )
         self.btn_sym_calib.clicked.connect(self.start_symmetry_calibration)
         grp_sync_layout.addWidget(self.btn_sym_calib)
         
@@ -1771,33 +1774,41 @@ class VREyebrowTrackerGUI(QMainWindow):
         settings_panel.addWidget(grp_sync)
         
         # --- Auto Baseline Correction panel ---
-        auto_group = QGroupBox("Automatic HMD Position Compensation")
+        auto_group = QGroupBox("Live Recenter / Headset Shift Compensation")
         auto_layout = QVBoxLayout()
         
         auto_controls = QHBoxLayout()
-        self.chk_auto_baseline = QCheckBox("Enable Auto-Baseline")
+        self.chk_auto_baseline = QCheckBox("Enable Auto-Baseline Follow")
         self.chk_auto_baseline.setChecked(False)
+        self.chk_auto_baseline.setToolTip(
+            "Slowly follow your resting face only while expression movement is stable."
+        )
         self.chk_auto_baseline.stateChanged.connect(self.toggle_auto_baseline)
         self.chk_auto_baseline.stateChanged.connect(lambda v: self._update_setting("auto_baseline", v == Qt.Checked))
         
-        self.btn_reset_baseline = QPushButton("Snapshot Baseline Now")
+        self.btn_reset_baseline = QPushButton("Reset Auto-Baseline History")
+        self.btn_reset_baseline.setToolTip(
+            "Clear the accumulated resting-face history and start tracking a new rest pose."
+        )
         self.btn_reset_baseline.clicked.connect(self.reset_auto_baseline)
         auto_controls.addWidget(self.chk_auto_baseline)
         auto_controls.addWidget(self.btn_reset_baseline)
         
         auto_sliders = QHBoxLayout()
-        auto_sliders.addWidget(QLabel("Catch-up Speed (\u03B1):"))
+        auto_sliders.addWidget(QLabel("Follow Speed (\u03B1):"))
         self.slider_alpha = QSlider(Qt.Horizontal)
         self.slider_alpha.setRange(1, 100)
         self.slider_alpha.setValue(5) # Default 5% alpha
         self.slider_alpha.valueChanged.connect(lambda v: self._update_setting("alpha", v))
         auto_sliders.addWidget(self.slider_alpha)
 
-        self.btn_set_neutral = QPushButton("Set Neutral Baseline (Offset)")
-        self.btn_set_neutral.setToolTip("Click while neutral to fix tracking if the headset shifted.")
+        self.btn_set_neutral = QPushButton("Recenter Neutral Now")
+        self.btn_set_neutral.setToolTip(
+            "Click while relaxed to treat the current face as neutral without retraining."
+        )
         self.btn_set_neutral.clicked.connect(self.set_neutral_baseline)
-        self.btn_reset_offsets = QPushButton("Reset Offsets (Zero)")
-        self.btn_reset_offsets.setToolTip("Force offsets to 0.0 for both eyes.")
+        self.btn_reset_offsets = QPushButton("Clear Manual Neutral Offset")
+        self.btn_reset_offsets.setToolTip("Remove the manual neutral recenter offset for both eyes.")
         self.btn_reset_offsets.clicked.connect(self.reset_offsets_zero)
         self.lbl_auto_status = QLabel("Status: Waiting for stable neutral frame...")
         self.lbl_auto_status.setStyleSheet("color: #888;")
@@ -1834,23 +1845,27 @@ class VREyebrowTrackerGUI(QMainWindow):
 
     def setup_calibration_tab(self):
         layout = QVBoxLayout(self.tab_calibration)
-        
-        instr = QLabel("The manual buttons have been removed.\n"
-                       "Click START, and follow the instructions on screen.\n"
-                       "The system will automatically record your face for each expression.")
-        instr.setProperty("class", "bold-label")
-        layout.addWidget(instr)
+        lbl_capture = QLabel("Guided Dataset Capture")
+        lbl_capture.setProperty("class", "bold-label")
+        layout.addWidget(lbl_capture)
         
         # Automatic Guided Sequence UI
         seq_controls = QHBoxLayout()
         
-        self.btn_start_seq = QPushButton("START GUIDED CALIBRATION")
+        self.btn_start_seq = QPushButton("START GUIDED CAPTURE")
         self.btn_start_seq.setProperty("class", "primary-btn-success")
+        self.btn_start_seq.setToolTip(
+            "Record labeled eyebrow training frames for Neutral, Brows Up, Frown, Sad Inner, "
+            "and Smile Outer, including random-gaze stages."
+        )
         self.btn_start_seq.clicked.connect(self.start_calibration_sequence)
         seq_controls.addWidget(self.btn_start_seq)
         
-        self.btn_stop_seq = QPushButton("STOP CALIBRATION")
+        self.btn_stop_seq = QPushButton("STOP CAPTURE")
         self.btn_stop_seq.setProperty("class", "primary-btn-danger")
+        self.btn_stop_seq.setToolTip(
+            "Abort the current guided capture and discard frames recorded in this run."
+        )
         self.btn_stop_seq.clicked.connect(self.stop_calibration_sequence)
         self.btn_stop_seq.setEnabled(False)
         seq_controls.addWidget(self.btn_stop_seq)
@@ -1858,7 +1873,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         seq_layout = QVBoxLayout()
         seq_layout.addLayout(seq_controls)
         
-        self.lbl_seq_instruction = QLabel("Ready")
+        self.lbl_seq_instruction = QLabel("Ready to capture training data")
         self.lbl_seq_instruction.setAlignment(Qt.AlignCenter)
         self.lbl_seq_instruction.setFont(QFont("Arial", 24, QFont.Bold))
         self.lbl_seq_instruction.setStyleSheet("color: #111; margin-top: 20px; margin-bottom: 20px;")
@@ -1868,18 +1883,21 @@ class VREyebrowTrackerGUI(QMainWindow):
         
         # Dataset Management
         data_layout = QHBoxLayout()
-        self.lbl_dataset_status = QLabel("  |  Current Saved Dataset: 0 images")
+        self.lbl_dataset_status = QLabel("  |  Captured training images: 0")
         self.lbl_dataset_status.setProperty("class", "muted-label")
         data_layout.addWidget(self.lbl_dataset_status)
         
-        self.btn_clear_data = QPushButton("Clear Calibration Data")
+        self.btn_clear_data = QPushButton("Clear Captured Data")
         self.btn_clear_data.setProperty("class", "primary-btn-danger")
+        self.btn_clear_data.setToolTip(
+            "Delete all captured eyebrow training images and the generated CSV files."
+        )
         self.btn_clear_data.clicked.connect(self.clear_calibration_data)
         data_layout.addWidget(self.btn_clear_data)
         layout.addLayout(data_layout)
         
         # Training Section
-        lbl_train = QLabel("Training Pipeline")
+        lbl_train = QLabel("Train / Bake Model")
         lbl_train.setFont(QFont("Arial", 12, QFont.Bold))
         lbl_train.setProperty("class", "header-label")
         layout.addWidget(lbl_train)
@@ -1887,6 +1905,9 @@ class VREyebrowTrackerGUI(QMainWindow):
         train_mode_row = QHBoxLayout()
         self.chk_lr_models = QCheckBox("Beta: Separate L/R Models")
         self.chk_lr_models.setChecked(False)
+        self.chk_lr_models.setToolTip(
+            "Train separate left/right models instead of one shared model."
+        )
         self.chk_lr_models.stateChanged.connect(self._toggle_lr_models)
         self.chk_lr_models.stateChanged.connect(lambda v: self._update_setting("use_lr_models", v == Qt.Checked))
         train_mode_row.addWidget(self.chk_lr_models)
@@ -1894,15 +1915,21 @@ class VREyebrowTrackerGUI(QMainWindow):
         layout.addLayout(train_mode_row)
         
         train_btn_row = QHBoxLayout()
-        self.btn_train = QPushButton("BAKE MODEL (Start Training)")
+        self.btn_train = QPushButton("BAKE MODEL FROM CAPTURED DATA")
         self.btn_train.setObjectName("btn_bake_main")
         self.btn_train.setProperty("class", "primary-btn-purple")
+        self.btn_train.setToolTip(
+            "Train a model using the dataset captured in this app and save the best weights."
+        )
         self.btn_train.clicked.connect(self.start_training)
         train_btn_row.addWidget(self.btn_train)
         
-        self.btn_train_with_path = QPushButton("BAKE (With Path)")
+        self.btn_train_with_path = QPushButton("BAKE FROM OTHER FOLDER")
         self.btn_train_with_path.setObjectName("btn_bake_with_path")
         self.btn_train_with_path.setProperty("class", "primary-btn")
+        self.btn_train_with_path.setToolTip(
+            "Train a model from a different dataset folder instead of the current captured data."
+        )
         self.btn_train_with_path.clicked.connect(self.start_training_with_path)
         train_btn_row.addWidget(self.btn_train_with_path)
         
@@ -2198,15 +2225,13 @@ class VREyebrowTrackerGUI(QMainWindow):
         self._update_setting("sym_scale_l", self.sym_scale_l)
         self._update_setting("sym_scale_r", self.sym_scale_r)
 
-        self.lbl_auto_status.setText(f"Symmetry Calib Done: L x{scale_l:.2f}, R x{scale_r:.2f}")
+        self.lbl_auto_status.setText(f"Symmetry Match saved: L x{scale_l:.2f}, R x{scale_r:.2f}")
         self.lbl_auto_status.setStyleSheet("color: #4CAF50;")
         self.brow_history_l.clear()
         self.brow_history_r.clear()
-        self.lbl_auto_status.setText("Status: Offsets reset to 0.0")
-        self.lbl_auto_status.setStyleSheet("color: #888;")
 
     def update_dataset_status(self):
-        self.lbl_dataset_status.setText(f"  |  Current Saved Dataset: {len(self.recorded_frames)} images")
+        self.lbl_dataset_status.setText(f"  |  Captured training images: {len(self.recorded_frames)}")
 
     def prune_dataset(self, records, root_dir, key_func, limit):
         # Class-Balanced Pruning: If over limit, delete oldest images from the largest class bucket
@@ -2237,7 +2262,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         return pruned
 
     def clear_calibration_data(self):
-        if QMessageBox.question(self, "Confirm", "Are you sure you want to delete all collected Eyebrow calibration images and CSVs?", QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+        if QMessageBox.question(self, "Confirm", "Are you sure you want to delete all captured eyebrow training images and CSVs?", QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
             self.recorded_frames.clear()
             errors = []
             try:
@@ -2254,7 +2279,7 @@ class VREyebrowTrackerGUI(QMainWindow):
                 except Exception as e:
                     errors.append(f"{f}: {e}")
             self.update_dataset_status()
-            QMessageBox.information(self, "Cleared", "Eyebrow calibration data cleared.")
+            QMessageBox.information(self, "Cleared", "Captured eyebrow training data cleared.")
             if errors:
                 msg = "Some files could not be deleted:\n" + "\n".join(errors[:10])
                 if len(errors) > 10:
@@ -2435,10 +2460,20 @@ class VREyebrowTrackerGUI(QMainWindow):
                 QMessageBox.warning(self, "Warning", "No camera frames received! Please check your eye tracking streams.")
                 return
             
-        expressions = [s['name'] for s in self.calib_states if s['target'] is not None]
-        msg = "The following expressions will be recorded for 10 seconds each:\n\n"
-        msg += "\n".join(expressions)
-        msg += "\n\nMake sure your headset is firmly positioned."
+        capture_states = [s for s in self.calib_states if s['target'] is not None]
+        msg_lines = [
+            "This guided capture records labeled training images for model baking.",
+            "It does not change the live tracker until you bake and load a model.",
+            "",
+            "Active recording stages:"
+        ]
+        msg_lines.extend(f"- {s['name']}: {int(s['duration'])}s" for s in capture_states)
+        msg_lines.extend([
+            "",
+            "Random-gaze stages help the model ignore eye direction.",
+            "Make sure your headset is firmly positioned before you start."
+        ])
+        msg = "\n".join(msg_lines)
         
         reply = QMessageBox.information(self, "Calibration Sequence", msg, QMessageBox.Ok | QMessageBox.Cancel)
         if reply == QMessageBox.Cancel:
@@ -2450,18 +2485,18 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.calib_idx = 0
         self.calib_start_time = time.time()
         self.calib_start_count = len(self.recorded_frames)
-        self.lbl_seq_instruction.setText(f"Get Ready for: {self.calib_states[0]['name']}...")
+        self.lbl_seq_instruction.setText(f"Get Ready: {self.calib_states[0]['name']}...")
 
     def _reset_seq_text(self):
         if not self.is_calibrating:
-            self.lbl_seq_instruction.setText("Ready")
+            self.lbl_seq_instruction.setText("Ready to capture training data")
             self.lbl_seq_instruction.setStyleSheet("color: #111; margin-top: 20px; margin-bottom: 20px;")
 
     def stop_calibration_sequence(self):
         self.is_calibrating = False
         self.btn_start_seq.setEnabled(True)
         self.btn_stop_seq.setEnabled(False)
-        self.lbl_seq_instruction.setText("Calibration Stopped. Discarding partial data...")
+        self.lbl_seq_instruction.setText("Capture stopped. Discarding partial data...")
         self.lbl_seq_instruction.setStyleSheet("color: #eb9534; margin-top: 20px; margin-bottom: 20px;")
         QTimer.singleShot(3000, self._reset_seq_text)
         
@@ -2548,7 +2583,7 @@ class VREyebrowTrackerGUI(QMainWindow):
                 if self.calib_idx >= len(self.calib_states):
                     # Finished
                     self.is_calibrating = False
-                    self.lbl_seq_instruction.setText("Calibration Complete!\nYou can now bake the model.")
+                    self.lbl_seq_instruction.setText("Dataset capture complete.\nYou can now bake the model.")
                     self.btn_start_seq.setEnabled(True)
                     self.btn_stop_seq.setEnabled(False)
                 else:
