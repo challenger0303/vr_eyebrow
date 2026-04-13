@@ -402,10 +402,16 @@ class CameraThread(QThread):
                                 self.cap.release()
                             except Exception:
                                 pass
-                            time.sleep(1)
+                            self.cap = None
+                            # Wait for OS to fully release the camera device
+                            time.sleep(2)
+                            if not self.running: break
                             if isinstance(self.source, int):
                                 self.cap = cv2.VideoCapture(self.source, cv2.CAP_DSHOW)
                                 if not self.cap.isOpened():
+                                    try: self.cap.release()
+                                    except Exception: pass
+                                    time.sleep(0.5)
                                     self.cap = cv2.VideoCapture(self.source)
                             else:
                                 try:
@@ -413,6 +419,9 @@ class CameraThread(QThread):
                                 except Exception:
                                     self.cap = cv2.VideoCapture(self.source)
                                 if not self.cap.isOpened():
+                                    try: self.cap.release()
+                                    except Exception: pass
+                                    time.sleep(0.5)
                                     self.cap = cv2.VideoCapture(self.source)
                             fail_count = 0
                         time.sleep(1)
@@ -1298,6 +1307,9 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.mjpeg_sharing_enabled = (state == Qt.Checked)
         self._update_setting("mjpeg_sharing", self.mjpeg_sharing_enabled)
         if self.mjpeg_sharing_enabled:
+            # Stop any existing server before creating a new one
+            if self.mjpeg_server.is_running:
+                self.mjpeg_server.stop()
             port = int(self.txt_babble_port.text()) if self.txt_babble_port.text().isdigit() else 8085
             try:
                 self.mjpeg_server = MjpegServer(port=port)
@@ -3468,6 +3480,19 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.txt_console.setTextCursor(cursor)
 
     def closeEvent(self, event):
+        # Stop camera threads first to release device handles
+        if getattr(self, "cam_left", None):
+            try:
+                self.cam_left.stop(wait_ms=1000)
+            except Exception:
+                pass
+            self.cam_left = None
+        if getattr(self, "cam_right", None):
+            try:
+                self.cam_right.stop(wait_ms=1000)
+            except Exception:
+                pass
+            self.cam_right = None
         if self.mjpeg_server.is_running:
             self.mjpeg_server.stop()
         if hasattr(self, "_stdout"):

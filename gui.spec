@@ -45,6 +45,8 @@ for script in ['train.py', 'model.py', 'dataset.py', 'onnx_inference.py', 'expor
 if os.path.exists('eyebrow_model.onnx'):
     datas += [('eyebrow_model.onnx', '.'), ('eyebrow_model.onnx', '_internal')]
 datas += [('VERSION.txt', '.'), ('VERSION.txt', '_internal')]
+if os.path.exists('uninstall.bat'):
+    datas += [('uninstall.bat', '.')]
 
 for dll in [
     "vcruntime140.dll",

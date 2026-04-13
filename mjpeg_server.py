@@ -174,11 +174,24 @@ class MjpegServer:
         self._httpd.streaming = False
         self._started = False
         try:
+            # Force unblock handle_request() by connecting to ourselves
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            try:
+                sock.connect(("127.0.0.1", self.port))
+            except Exception:
+                pass
+            finally:
+                sock.close()
+        except Exception:
+            pass
+        try:
             self._httpd.server_close()
         except Exception:
             pass
         if self._thread:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=3.0)
         self._httpd = None
         self._thread = None
         print("[MJPEG Server] Stopped")
