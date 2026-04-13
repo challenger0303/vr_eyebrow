@@ -541,14 +541,15 @@ class TrainingSetupThread(QThread):
 
             pip = str(env_dir / "Scripts" / "pip.exe")
 
-            # Step 3: Install PyTorch CPU + deps
+            # Step 3: Install PyTorch CPU + torchvision + deps
             self.progress.emit("Installing PyTorch CPU (~200MB, one-time)...")
-            subprocess.run([pip, "install", "torch", "--index-url",
+            subprocess.run([pip, "install", "torch", "torchvision", "--index-url",
                            "https://download.pytorch.org/whl/cpu", "--no-warn-script-location"],
                           creationflags=subprocess.CREATE_NO_WINDOW)
 
             self.progress.emit("Installing training dependencies...")
-            subprocess.run([pip, "install", "pandas", "tqdm", "onnx", "pillow", "--no-warn-script-location"],
+            subprocess.run([pip, "install", "numpy<2.0", "pandas", "tqdm", "onnx", "pillow",
+                           "opencv-python-headless<4.11", "--no-warn-script-location"],
                           creationflags=subprocess.CREATE_NO_WINDOW)
 
             # Verify
