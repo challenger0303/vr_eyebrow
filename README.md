@@ -1,67 +1,136 @@
-# VR Eyebrow Tracker (PyTorch)
+# VR Eyebrow Tracker
 
-A lightweight, high-FPS PyTorch pipeline to estimate eyebrow Up/Down movements using indirect internal IR eye-tracking cameras (e.g., BrokenEye). Since the eyebrow itself is outside the IR camera's field of view, this method focuses on the upper-eyelid and skin deformation.
+A lightweight eyebrow tracking application for VR headsets. Uses ONNX Runtime + DirectML for GPU-accelerated inference on any GPU (NVIDIA, AMD, Intel). Works with BrokenEye, Pimax, Bigscreen Beyond, and DIY eye tracking cameras.
 
-## Core Concepts
+## Features
 
-1. **ROI Extraction**: It crops the top 40% of the 600x600 IR image. This effectively removes the pupil, eyelashes, and cheek that add noise or false correlations, forcing the CNN to look purely at the skin wrinkles and stretch above the eye.
-2. **Tiny Architecture**: Utilizes `TinyBrowNet`, a custom 4-layer CNN predicting a continuous value from `[-1.0 (Frown) to +1.0 (Surprised)]`. This allows inference execution well over 90 FPS on a low-end GPU.
-3. **Temporal Smoothing**: Uses an Exponential Moving Average (EMA) to prevent jitter without the latency cost of LSTMs or RNNs.
+- **GPU Inference via DirectML** - Works on NVIDIA, AMD, and Intel GPUs
+- **TinyBrowNet CNN** - Custom 4-layer CNN (35K params), inference in <1ms
+- **HMD Shift Compensation** - Real-time image-level tracking via phase correlation
+- **Power Curve Response** - Configurable deadzone curve to prevent accidental expressions
+- **MJPEG Camera Sharing** - Share camera feed with Baballonia for simultaneous eye + eyebrow tracking
+- **Guided Dataset Capture** - Frame-count based recording with automatic train/val split
+- **In-App Model Baking** - Train and export models without leaving the GUI
+- **OSC Output** - VRChat-compatible face tracking parameters (VRCFT/FT v2)
 
-## Data Collection Matrix (CRITICAL)
+## Quick Start
 
-Because the eyebrow tracking relies on skin deformation near the eye, it is extremely easy for a neural network to confuse "Eye blinking" with "Eyebrow dropping" or "Eyes wide" with "Eyebrow raising".
+### From Source
+```
+run.bat
+```
+This will:
+1. Find or create a Python virtual environment
+2. Install dependencies (onnxruntime-directml, PyTorch, etc.)
+3. Launch the GUI
 
-To prevent this, you **MUST** collect training frames enforcing all combinations of eye states and brow states. By doing this, the CNN learns to isolate the brow deformation, ignoring the open/closed state of the eye itself.
+### From Built Executable
+Download `VR Eyebrow Tracker.exe` from Releases and run it.
 
-Record ~30-60 seconds of video for each of these 6 states:
+## OSC Parameters
 
-| Brow State | Eye State | Target Label |
-| :--- | :--- | :--- |
-| Neutral | Open | `0.0` |
-| Neutral | Closed | `0.0` |
-| UP (Surprised) | Open | `1.0` |
-| UP (Surprised) | Closed | `1.0` |
-| DOWN (Frown) | Open | `-1.0` |
-| DOWN (Frown) | Closed | `-1.0` |
+The following parameters are sent to VRChat via OSC:
 
-Extract these videos into individual frames and log their corresponding `Target Label` into a `train.csv` and `val.csv` file.
+| Parameter | Address | Range | Description |
+|-----------|---------|-------|-------------|
+| BrowExpressionLeft | `/avatar/parameters/FT/v2/BrowExpressionLeft` | -1 to +1 | Left eyebrow (full range) |
+| BrowExpressionRight | `/avatar/parameters/FT/v2/BrowExpressionRight` | -1 to +1 | Right eyebrow (full range) |
+| BrowUpLeft | `/avatar/parameters/FT/v2/BrowUpLeft` | 0 to 1 | Left eyebrow raised |
+| BrowUpRight | `/avatar/parameters/FT/v2/BrowUpRight` | 0 to 1 | Right eyebrow raised |
+| BrowDownLeft | `/avatar/parameters/FT/v2/BrowDownLeft` | 0 to 1 | Left eyebrow lowered |
+| BrowDownRight | `/avatar/parameters/FT/v2/BrowDownRight` | 0 to 1 | Right eyebrow lowered |
+| BrowUp | `/avatar/parameters/FT/v2/BrowUp` | 0 to 1 | Both eyebrows raised (average) |
+| BrowDown | `/avatar/parameters/FT/v2/BrowDown` | 0 to 1 | Both eyebrows lowered (average) |
 
-## Usage
+Each parameter can be toggled on/off in the Debug panel.
 
-1. **Prepare Data**:
-   Place your images in `data/images/` and create `data/train.csv` and `data/val.csv` following this format:
-   ```csv
-   filename,label
-   neutral_open_001.png,0.0
-   surprised_closed_014.png,1.0
-   frown_open_040.png,-1.0
-   ```
+## Tabs
 
-2. **Train Model**:
-   ```bash
-   python train.py
-   ```
-   This will train the TinyBrowNet and save the best weights to `tinybrownet_best.pth`.
+### Tracker
+- Live camera preview (left/right eye)
+- Start/Stop camera streams (URL or device)
+- OSC sender toggle
+- Model loading (.onnx or .pth with auto-conversion)
+- Signal smoothing, L/R symmetry matching
+- Headset recenter (manual + auto-drift follow)
+- Inference graph
+- Debug panel: per-parameter curve/boost tuning with live preview, OSC parameter toggles, manual override
 
-3. **Run Inference**:
-   Replace the `camera_id=0` in `inference.py` with your Python code that fetches the BrokenEye 600x600 grayscale IR byte stream.
-   ```bash
-   python inference.py
-   ```
-   *Note: In `inference.py`, there is a commented out line showing where to hook up the output to a Python OSC library (`python-osc`) to send the smoothed prediction directly to VRChat.*
+### Training
+- Guided dataset capture (frame-count based)
+- Bake model from captured data or external folder
+- Embedded console with training progress
+- Auto ONNX export after training
 
-## GUI Calibration Types
+### Settings
+- Compute device selection (DirectML GPU / CPU)
+- HMD profile (Pimax/Varjo, Bigscreen Beyond, DIY)
+- Light/Dark theme
+- OSC IP/port configuration
+- Baballonia camera sharing (MJPEG server port)
+- GitHub update checker
 
-The GUI currently exposes three different "calibration" ideas. They solve different problems:
+## Camera Sharing with Baballonia
 
-1. **Dataset Capture & Training**: Records labeled expression frames such as Neutral, Brows Up, Frown, Sad Inner, and Smile Outer. This is offline data collection for model baking, not live recentering.
-2. **Recenter Neutral / Auto-Baseline**: Adjusts the live resting point after the headset shifts. Use `Recenter Neutral Now` for a one-shot reset, or enable auto-baseline if you want the rest pose to drift slowly while your face stays still.
-3. **L/R Output Matching**: Samples Neutral, Max Up, and Max Down from the current live tracker, then rescales left/right output so both sides have similar amplitude.
+For HMDs with a single shared camera (e.g., Bigscreen Beyond):
 
-Recommended order in the app:
+1. Select **Bigscreen Beyond** or **DIY** as HMD profile
+2. Enable **Share camera via MJPEG** in the Tracker tab
+3. Copy the address shown (e.g., `http://localhost:8085/mjpeg`)
+4. Paste it into Baballonia's Camera Address field
 
-1. Capture training data and bake a model.
-2. Start live tracking.
-3. Recenter neutral if the headset has moved.
-4. Run L/R output matching if one side is consistently stronger than the other.
+This app grabs the camera and re-broadcasts via MJPEG, so Baballonia can receive frames without a camera lock conflict.
+
+## Architecture
+
+```
+Camera (BrokenEye / DirectShow / MJPEG)
+  |
+  v
+HMD Shift Tracker (phase correlation on stable image region)
+  |
+  v
+ROI Crop (top 40%, sides 15-85%, shift-compensated)
+  |
+  v
+TinyBrowNet ONNX (64x64 grayscale -> [brow, inner, outer])
+  |  via ONNX Runtime + DirectML (GPU)
+  |
+  v
+Auto-Baseline Correction (time-based, hysteresis)
+  |
+  v
+EMA Smoothing -> Power Curve -> Symmetry Calibration
+  |
+  v
+OSC Output (8 parameters to VRChat)
+```
+
+## Data Collection
+
+The guided capture collects ~5,250 frames per session across 5 expressions:
+- Neutral (resting + random gaze)
+- Surprised (brows up + random gaze)
+- Frown (brows down + random gaze)
+- Sad (inner brows up + random gaze)
+- Smile (outer brows down + random gaze)
+
+## Requirements
+
+- Windows 10/11
+- DirectX 12 compatible GPU (any vendor)
+- Python 3.10+ (for source/training)
+- BrokenEye or compatible eye tracking camera
+
+## Build
+
+```
+build.bat
+```
+Produces a ~407 MB distributable in `dist/gui/`.
+
+Training requires PyTorch (installed in venv, not bundled in the exe). The built exe automatically finds a nearby venv with PyTorch for model baking.
+
+## License
+
+See LICENSE file.

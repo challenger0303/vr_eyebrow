@@ -22,11 +22,12 @@ if exist "venv_gpu\Scripts\activate.bat" (
 call "venv_gpu\Scripts\activate.bat"
 echo.
 
-echo Ensuring required modules (cv2)...
-python -c "import cv2" >nul 2>&1
+echo Ensuring required modules (cv2, onnxruntime)...
+python -c "import cv2; import onnxruntime" >nul 2>&1
 if errorlevel 1 (
     echo Installing requirements...
     python -m pip install --upgrade pip
+    python -m pip install onnxruntime-directml
     python -m pip install --extra-index-url https://download.pytorch.org/whl/cu118 -r requirements.txt
     if errorlevel 1 (
         echo ERROR: Failed to install requirements. Check your network and Python environment.
@@ -36,17 +37,17 @@ if errorlevel 1 (
     )
 )
 
-:check_cv2
-echo Checking for required modules (cv2)...
-python -c "import cv2; print(cv2.__version__)" >nul 2>&1
+:check_dependencies
+echo Checking for required modules (cv2, onnxruntime)...
+python -c "import cv2; import onnxruntime; print(cv2.__version__)" >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Python module 'cv2' not found in the active environment.
-    echo Install OpenCV in this environment, then rerun this script.
+    echo ERROR: Python modules 'cv2' and/or 'onnxruntime' were not found in the active environment.
+    echo Install the missing dependencies in this environment, then rerun this script.
     echo.
     pause
     exit /b 1
 )
-echo cv2 OK.
+echo cv2 / onnxruntime OK.
 echo.
 
 :menu

@@ -22,15 +22,15 @@ if exist "venv_cpu\Scripts\activate.bat" (
 call "venv_cpu\Scripts\activate.bat"
 echo.
 
-echo Ensuring required modules (cv2)...
-python -c "import cv2" >nul 2>&1
+echo Ensuring required modules (cv2, onnxruntime)...
+python -c "import cv2; import onnxruntime" >nul 2>&1
 if errorlevel 1 (
     echo Installing CPU-only requirements...
     python -m pip install --upgrade pip
-    python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-    rem Install remaining requirements except torch/torchvision/torchaudio
+    python -m pip install onnxruntime-directml
+    rem Install remaining requirements except torch/torchvision/torchaudio (not needed for CPU inference build)
     if exist "requirements_cpu.txt" del /q "requirements_cpu.txt"
-    findstr /i /v "^torch\> ^torchvision\> ^torchaudio\>" requirements.txt > requirements_cpu.txt
+    findstr /i /v "^torch" requirements.txt > requirements_cpu.txt
     python -m pip install -r requirements_cpu.txt
     if errorlevel 1 (
         echo ERROR: Failed to install requirements. Check your network and Python environment.
@@ -40,17 +40,17 @@ if errorlevel 1 (
     )
 )
 
-:check_cv2
-echo Checking for required modules (cv2)...
-python -c "import cv2; print(cv2.__version__)" >nul 2>&1
+:check_dependencies
+echo Checking for required modules (cv2, onnxruntime)...
+python -c "import cv2; import onnxruntime; print(cv2.__version__)" >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Python module 'cv2' not found in the active environment.
-    echo Install OpenCV in this environment, then rerun this script.
+    echo ERROR: Python modules 'cv2' and/or 'onnxruntime' were not found in the active environment.
+    echo Install the missing dependencies in this environment, then rerun this script.
     echo.
     pause
     exit /b 1
 )
-echo cv2 OK.
+echo cv2 / onnxruntime OK.
 echo.
 
 echo Building GUI using PyInstaller (CPU build)...
