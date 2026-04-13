@@ -12,6 +12,11 @@ import cv2
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+
+
+class _ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 _BOUNDARY = b"mjpegstream"
 
@@ -24,14 +29,14 @@ class _MjpegHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/mjpeg":
-            self._handle_mjpeg()
+        if self.path in ("/mjpeg", "/left", "/right"):
+            self._handle_mjpeg(self.path)
         elif self.path in ("/snapshot", "/jpeg"):
             self._handle_snapshot()
         else:
             self._handle_index()
 
-    def _handle_mjpeg(self):
+    def _handle_mjpeg(self, path="/mjpeg"):
         self.send_response(200)
         self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={_BOUNDARY.decode()}")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -41,7 +46,12 @@ class _MjpegHandler(BaseHTTPRequestHandler):
         server = self.server
         try:
             while server.streaming:
-                jpeg = server.current_jpeg
+                if path == "/left":
+                    jpeg = server.current_jpeg_left
+                elif path == "/right":
+                    jpeg = server.current_jpeg_right
+                else:
+                    jpeg = server.current_jpeg
                 if jpeg is None:
                     time.sleep(0.033)
                     continue
@@ -119,9 +129,11 @@ class MjpegServer:
     def start(self):
         if self._started:
             return
-        self._httpd = HTTPServer(("127.0.0.1", self.port), _MjpegHandler)
+        self._httpd = _ThreadedHTTPServer(("127.0.0.1", self.port), _MjpegHandler)
         self._httpd.streaming = True
         self._httpd.current_jpeg = None
+        self._httpd.current_jpeg_left = None
+        self._httpd.current_jpeg_right = None
         self._httpd.timeout = 0.5
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
@@ -133,16 +145,28 @@ class MjpegServer:
             self._httpd.handle_request()
 
     def update_frame(self, bgr_frame):
-        """Encode a BGR numpy frame to JPEG and make it available to clients.
-
-        Args:
-            bgr_frame: OpenCV BGR numpy array (H, W, 3) uint8.
-        """
+        """Encode a BGR numpy frame to JPEG (combined stream)."""
         if self._httpd is None or bgr_frame is None:
             return
         ok, buf = cv2.imencode(".jpg", bgr_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if ok:
             self._httpd.current_jpeg = buf.tobytes()
+
+    def update_frame_left(self, bgr_frame):
+        """Encode left eye frame to JPEG (/left endpoint)."""
+        if self._httpd is None or bgr_frame is None:
+            return
+        ok, buf = cv2.imencode(".jpg", bgr_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ok:
+            self._httpd.current_jpeg_left = buf.tobytes()
+
+    def update_frame_right(self, bgr_frame):
+        """Encode right eye frame to JPEG (/right endpoint)."""
+        if self._httpd is None or bgr_frame is None:
+            return
+        ok, buf = cv2.imencode(".jpg", bgr_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ok:
+            self._httpd.current_jpeg_right = buf.tobytes()
 
     def stop(self):
         if not self._started:

@@ -1057,11 +1057,16 @@ class VREyebrowTrackerGUI(QMainWindow):
 
     def _apply_hmd_ui(self):
         is_bigscreen = (self.hmd_profile == "Bigscreen Beyond 2e")
-        show_babble = is_bigscreen or (self.hmd_profile == "DIY")
+        is_diy = (self.hmd_profile == "DIY")
+        show_babble = is_bigscreen or is_diy
         self.use_combined_feed = is_bigscreen
         self._update_setting("combined_feed", self.use_combined_feed)
         if hasattr(self, "grp_babble"):
             self.grp_babble.setVisible(show_babble)
+        if hasattr(self, "babble_url_combined"):
+            self.babble_url_combined.setVisible(is_bigscreen)
+        if hasattr(self, "babble_url_dual"):
+            self.babble_url_dual.setVisible(is_diy)
         if is_bigscreen and hasattr(self, "cmb_cam_l"):
             # reset to selection placeholder so we don't reuse a previous camera
             self.cmb_cam_l.setCurrentIndex(0)
@@ -1281,6 +1286,9 @@ class VREyebrowTrackerGUI(QMainWindow):
         self._update_setting("baballonia_mjpeg_port", port)
         if hasattr(self, "txt_babble_url"):
             self.txt_babble_url.setText(f"http://localhost:{port}/mjpeg")
+        if hasattr(self, "txt_babble_url_l"):
+            self.txt_babble_url_l.setText(f"http://localhost:{port}/left")
+            self.txt_babble_url_r.setText(f"http://localhost:{port}/right")
 
     def _toggle_mjpeg_sharing(self, state):
         self.mjpeg_sharing_enabled = (state == Qt.Checked)
@@ -1906,20 +1914,63 @@ class VREyebrowTrackerGUI(QMainWindow):
         share_row.addStretch(1)
         grp_babble_layout.addLayout(share_row)
 
-        # Copyable URL for Baballonia
-        url_row = QHBoxLayout()
+        # Copyable URL — single (Bigscreen combined) or dual (DIY left/right)
+        url_style = "background: #222; color: #4FC3F7; border: 1px solid #555; padding: 4px 8px; font-size: 13px;"
+        port = self.settings.get('baballonia_mjpeg_port', 8085)
+
+        # Combined URL (Bigscreen Beyond)
+        self.babble_url_combined = QWidget()
+        url_row = QHBoxLayout(self.babble_url_combined)
+        url_row.setContentsMargins(0, 0, 0, 0)
         url_row.addWidget(QLabel("Address:"))
-        self.txt_babble_url = QLineEdit(f"http://localhost:{self.settings.get('baballonia_mjpeg_port', 8085)}/mjpeg")
+        self.txt_babble_url = QLineEdit(f"http://localhost:{port}/mjpeg")
         self.txt_babble_url.setReadOnly(True)
         self.txt_babble_url.setMinimumHeight(28)
-        self.txt_babble_url.setStyleSheet("background: #222; color: #4FC3F7; border: 1px solid #555; padding: 4px 8px; font-size: 13px;")
+        self.txt_babble_url.setStyleSheet(url_style)
         self.txt_babble_url.mousePressEvent = lambda e: self.txt_babble_url.selectAll()
         url_row.addWidget(self.txt_babble_url, stretch=1)
-        btn_copy_url = QPushButton("Copy")
-        btn_copy_url.setFixedWidth(50)
-        btn_copy_url.clicked.connect(lambda: QApplication.clipboard().setText(self.txt_babble_url.text()))
-        url_row.addWidget(btn_copy_url)
-        grp_babble_layout.addLayout(url_row)
+        btn_copy = QPushButton("Copy")
+        btn_copy.setFixedWidth(50)
+        btn_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.txt_babble_url.text()))
+        url_row.addWidget(btn_copy)
+        grp_babble_layout.addWidget(self.babble_url_combined)
+
+        # Dual URL (DIY — left/right separate)
+        self.babble_url_dual = QWidget()
+        dual_layout = QVBoxLayout(self.babble_url_dual)
+        dual_layout.setContentsMargins(0, 0, 0, 0)
+        dual_layout.setSpacing(4)
+
+        left_row = QHBoxLayout()
+        left_row.addWidget(QLabel("Left:"))
+        self.txt_babble_url_l = QLineEdit(f"http://localhost:{port}/left")
+        self.txt_babble_url_l.setReadOnly(True)
+        self.txt_babble_url_l.setMinimumHeight(28)
+        self.txt_babble_url_l.setStyleSheet(url_style)
+        self.txt_babble_url_l.mousePressEvent = lambda e: self.txt_babble_url_l.selectAll()
+        left_row.addWidget(self.txt_babble_url_l, stretch=1)
+        btn_copy_l = QPushButton("Copy")
+        btn_copy_l.setFixedWidth(50)
+        btn_copy_l.clicked.connect(lambda: QApplication.clipboard().setText(self.txt_babble_url_l.text()))
+        left_row.addWidget(btn_copy_l)
+        dual_layout.addLayout(left_row)
+
+        right_row = QHBoxLayout()
+        right_row.addWidget(QLabel("Right:"))
+        self.txt_babble_url_r = QLineEdit(f"http://localhost:{port}/right")
+        self.txt_babble_url_r.setReadOnly(True)
+        self.txt_babble_url_r.setMinimumHeight(28)
+        self.txt_babble_url_r.setStyleSheet(url_style)
+        self.txt_babble_url_r.mousePressEvent = lambda e: self.txt_babble_url_r.selectAll()
+        right_row.addWidget(self.txt_babble_url_r, stretch=1)
+        btn_copy_r = QPushButton("Copy")
+        btn_copy_r.setFixedWidth(50)
+        btn_copy_r.clicked.connect(lambda: QApplication.clipboard().setText(self.txt_babble_url_r.text()))
+        right_row.addWidget(btn_copy_r)
+        dual_layout.addLayout(right_row)
+
+        self.babble_url_dual.setVisible(False)
+        grp_babble_layout.addWidget(self.babble_url_dual)
 
         self.lbl_mjpeg_status = QLabel("MJPEG Server: Off")
         self.lbl_mjpeg_status.setStyleSheet("color: #888;")
@@ -2812,9 +2863,12 @@ class VREyebrowTrackerGUI(QMainWindow):
                 if self.mjpeg_sharing_enabled and combined is not None:
                     self.mjpeg_server.update_frame(combined)
                 frame_l_bgr, frame_r_bgr = self._split_combined_frame(combined)
-            elif self.mjpeg_sharing_enabled and frame_l_bgr is not None:
-                # Non-combined: share left eye frame
-                self.mjpeg_server.update_frame(frame_l_bgr)
+            elif self.mjpeg_sharing_enabled:
+                # Non-combined (DIY): share left and right separately
+                if frame_l_bgr is not None:
+                    self.mjpeg_server.update_frame_left(frame_l_bgr)
+                if frame_r_bgr is not None:
+                    self.mjpeg_server.update_frame_right(frame_r_bgr)
             
             if self.tabs.currentIndex() == 0:
                 if (self.is_connected_left or self.use_combined_feed) and frame_l_bgr is None:
