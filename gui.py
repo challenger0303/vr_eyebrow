@@ -2918,14 +2918,14 @@ class VREyebrowTrackerGUI(QMainWindow):
                 combined = self._apply_combined_transform(combined)
                 # Share raw combined frame to Baballonia before splitting
                 if self.mjpeg_sharing_enabled and combined is not None:
-                    self.mjpeg_server.update_frame(combined)
+                    self.mjpeg_server.update_frame(combined.copy())
                 frame_l_bgr, frame_r_bgr = self._split_combined_frame(combined)
             elif self.mjpeg_sharing_enabled:
                 # Non-combined (DIY): share left and right separately
                 if frame_l_bgr is not None:
-                    self.mjpeg_server.update_frame_left(frame_l_bgr)
+                    self.mjpeg_server.update_frame_left(frame_l_bgr.copy())
                 if frame_r_bgr is not None:
-                    self.mjpeg_server.update_frame_right(frame_r_bgr)
+                    self.mjpeg_server.update_frame_right(frame_r_bgr.copy())
             
             if self.tabs.currentIndex() == 0:
                 if (self.is_connected_left or self.use_combined_feed) and frame_l_bgr is None:
