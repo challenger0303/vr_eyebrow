@@ -659,18 +659,22 @@ class TrainingThread(QThread):
                 self.progress.emit(f"Training Complete! {save_path}")
                 onnx_path = save_path.rsplit('.', 1)[0] + '.onnx'
                 try:
-                    subprocess.run([py, '-u', '-c',
+                    r = subprocess.run([py, '-u', '-c',
                         f"import sys; sys.path.insert(0,{script_dir!r}); "
-                        f"from onnx_inference import export_pth_to_onnx; "
-                        f"export_pth_to_onnx({save_path!r},{onnx_path!r})"],
-                        timeout=60, creationflags=subprocess.CREATE_NO_WINDOW)
-                    try:
-                        if os.path.exists(save_path):
+                        f"from export_eyebrow_onnx import export_onnx; "
+                        f"from pathlib import Path; "
+                        f"export_onnx(Path({save_path!r}), Path({onnx_path!r}), batch_size=2, opset=17)"],
+                        timeout=60, creationflags=subprocess.CREATE_NO_WINDOW,
+                        capture_output=True, text=True)
+                    if r.returncode == 0 and os.path.exists(onnx_path):
+                        try:
                             os.remove(save_path)
-                    except Exception:
-                        pass
-                    save_path = onnx_path
-                    self.progress.emit(f"ONNX exported: {onnx_path}")
+                        except Exception:
+                            pass
+                        save_path = onnx_path
+                        self.progress.emit(f"ONNX exported: {onnx_path}")
+                    else:
+                        self.progress.emit(f"ONNX export failed: {r.stderr or r.stdout}")
                 except Exception as e:
                     self.progress.emit(f"ONNX export failed: {e}")
             else:
@@ -1326,9 +1330,14 @@ class VREyebrowTrackerGUI(QMainWindow):
         if frame_bgr is None:
             return None, None
         h, w = frame_bgr.shape[:2]
-        mid = w // 2
-        left = frame_bgr[:, :mid]
-        right = frame_bgr[:, mid:]
+        if w >= h:
+            mid = w // 2
+            left = frame_bgr[:, :mid].copy()
+            right = frame_bgr[:, mid:].copy()
+        else:
+            mid = h // 2
+            left = frame_bgr[:mid, :].copy()
+            right = frame_bgr[mid:, :].copy()
         return left, right
 
     def _get_camera_source(self, combo, url_text):
@@ -1461,12 +1470,28 @@ class VREyebrowTrackerGUI(QMainWindow):
                 self.chk_combined.setChecked(self.use_combined_feed)
         if "combined_rotate" in s and hasattr(self, "cmb_combined_rotate"):
             self._set_camera_combo(self.cmb_combined_rotate, s["combined_rotate"])
+        model_loaded = False
         if "last_model_path" in s:
             path = s["last_model_path"]
             if path and os.path.exists(path):
-                self.load_weights(path)
-                if hasattr(self, "lbl_current_model"):
+                model_loaded = self.load_weights(path)
+                if model_loaded and hasattr(self, "lbl_current_model"):
                     self.lbl_current_model.setText(os.path.basename(path))
+        # Auto-load bundled model if no model loaded
+        if not model_loaded:
+            search = [
+                Path(sys.executable).parent / "eyebrow_model.onnx",
+                Path(sys.executable).parent / "_internal" / "eyebrow_model.onnx",
+                Path(__file__).resolve().parent / "eyebrow_model.onnx",
+            ]
+            if hasattr(sys, '_MEIPASS'):
+                search.insert(0, Path(sys._MEIPASS) / "eyebrow_model.onnx")
+            for candidate in search:
+                if candidate.exists():
+                    model_loaded = self.load_weights(str(candidate))
+                    if model_loaded and hasattr(self, "lbl_current_model"):
+                        self.lbl_current_model.setText(f"{candidate.name} (default)")
+                    break
         if "mjpeg_sharing" in s and hasattr(self, "chk_mjpeg_share"):
             self.chk_mjpeg_share.setChecked(bool(s["mjpeg_sharing"]))
         if hasattr(self, "cmb_hmd"):
@@ -1497,13 +1522,15 @@ class VREyebrowTrackerGUI(QMainWindow):
         path = str(path)
         if path.lower().endswith(('.pth', '.pt')):
             onnx_path = path.rsplit('.', 1)[0] + '.onnx'
-            if not os.path.exists(onnx_path):
-                print(f"Auto-converting {path} -> {onnx_path}")
-                try:
-                    export_pth_to_onnx(path, onnx_path, batch_size=2, opset=17)
-                except Exception as e:
-                    print(f"Failed to convert {path} to ONNX: {e}")
-                    return None
+            if os.path.exists(onnx_path):
+                return onnx_path
+            print(f"Auto-converting {path} -> {onnx_path}")
+            try:
+                export_pth_to_onnx(path, onnx_path, batch_size=2, opset=17)
+            except Exception as e:
+                print(f"Failed to convert .pth to ONNX: {e}")
+                print("Tip: Use 'Bake Model' to train a new .onnx model, or load an existing .onnx file.")
+                return None
             return onnx_path
         return path
 
