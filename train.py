@@ -1,5 +1,7 @@
+import argparse
 import os
 import tempfile
+from pathlib import Path
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -18,6 +20,7 @@ PATIENCE = 5  # For early stopping
 
 import time
 
+
 def _filter_csv(csv_path, side_filter):
     df = pd.read_csv(csv_path)
     if side_filter == "left":
@@ -34,10 +37,16 @@ def _write_temp_csv(df):
     df.to_csv(path, index=False)
     return path
 
-def train_model(data_dir, csv_train, csv_val, save_path=None, side_filter=None):
+
+def _build_default_save_path(save_dir=None, prefix="model"):
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    directory = Path(save_dir) if save_dir else Path.cwd()
+    directory.mkdir(parents=True, exist_ok=True)
+    return str(directory / f"{prefix}_{timestamp}.pth")
+
+def train_model(data_dir, csv_train, csv_val, save_path=None, side_filter=None, preprocessed=False):
     if save_path is None:
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        save_path = f"model_{timestamp}.pth"
+        save_path = _build_default_save_path()
         
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -60,8 +69,18 @@ def train_model(data_dir, csv_train, csv_val, save_path=None, side_filter=None):
             train_csv_use = csv_train
             val_csv_use = csv_val
 
-        train_dataset = EyebrowDataset(csv_file=train_csv_use, img_dir=data_dir, is_train=True)
-        val_dataset = EyebrowDataset(csv_file=val_csv_use, img_dir=data_dir, is_train=False)
+        train_dataset = EyebrowDataset(
+            csv_file=train_csv_use,
+            img_dir=data_dir,
+            is_train=True,
+            preprocessed=preprocessed,
+        )
+        val_dataset = EyebrowDataset(
+            csv_file=val_csv_use,
+            img_dir=data_dir,
+            is_train=False,
+            preprocessed=preprocessed,
+        )
         
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, drop_last=True)
         val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
@@ -105,7 +124,7 @@ def train_model(data_dir, csv_train, csv_val, save_path=None, side_filter=None):
             optimizer.zero_grad()
             outputs = model(images)
             
-            # Simple MSE for 1D brow regression
+            # Multi-output regression: [brow, inner, outer]
             loss = criterion(outputs, labels)
             
             loss.backward()
@@ -150,17 +169,66 @@ def train_model(data_dir, csv_train, csv_val, save_path=None, side_filter=None):
         except Exception: pass
     return True
 
-def train_model_pair(data_dir, csv_train, csv_val, save_left, save_right):
-    ok_l = train_model(data_dir, csv_train, csv_val, save_path=save_left, side_filter="left")
-    ok_r = train_model(data_dir, csv_train, csv_val, save_path=save_right, side_filter="right")
+def train_model_pair(data_dir, csv_train, csv_val, save_left, save_right, preprocessed=False):
+    ok_l = train_model(
+        data_dir,
+        csv_train,
+        csv_val,
+        save_path=save_left,
+        side_filter="left",
+        preprocessed=preprocessed,
+    )
+    ok_r = train_model(
+        data_dir,
+        csv_train,
+        csv_val,
+        save_path=save_right,
+        side_filter="right",
+        preprocessed=preprocessed,
+    )
     return ok_l and ok_r
 
-if __name__ == "__main__":
-    # Ensure dataset paths exist or prompt user
-    DATA_DIR = "./data/eyebrow_images/"
-    TRAIN_CSV = "./data/train.csv"
-    VAL_CSV = "./data/val.csv"
-    
+def main():
+    global BATCH_SIZE, LEARNING_RATE, EPOCHS, PATIENCE
+
+    parser = argparse.ArgumentParser(
+        description="Train TinyBrowNet checkpoints from an eyebrow dataset."
+    )
+    parser.add_argument("--data-dir", default="./data/eyebrow_images/", help="Directory containing eyebrow images.")
+    parser.add_argument("--train-csv", default="./data/train.csv", help="Training CSV path.")
+    parser.add_argument("--val-csv", default="./data/val.csv", help="Validation CSV path.")
+    parser.add_argument("--save-path", default=None, help="Checkpoint output path.")
+    parser.add_argument("--save-dir", default=None, help="Directory for timestamped checkpoints when --save-path is omitted.")
+    parser.add_argument("--side-filter", choices=["left", "right"], default=None, help="Optional per-side training filter.")
+    parser.add_argument(
+        "--preprocessed",
+        action="store_true",
+        help="Treat images as already cropped/aligned and skip the dataset ROI crop.",
+    )
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Training batch size.")
+    parser.add_argument("--learning-rate", type=float, default=LEARNING_RATE, help="Adam learning rate.")
+    parser.add_argument("--epochs", type=int, default=EPOCHS, help="Maximum epoch count.")
+    parser.add_argument("--patience", type=int, default=PATIENCE, help="Early stopping patience.")
+    args = parser.parse_args()
+
+    BATCH_SIZE = args.batch_size
+    LEARNING_RATE = args.learning_rate
+    EPOCHS = args.epochs
+    PATIENCE = args.patience
+
+    save_path = args.save_path or _build_default_save_path(args.save_dir)
+
     print("VR Eyebrow Estimation - Training Loop")
-    print("Make sure you have collected data following the 6-state matrix strategy.")
-    train_model(DATA_DIR, TRAIN_CSV, VAL_CSV)
+    print("Targets: brow / inner / outer")
+    train_model(
+        args.data_dir,
+        args.train_csv,
+        args.val_csv,
+        save_path=save_path,
+        side_filter=args.side_filter,
+        preprocessed=args.preprocessed,
+    )
+
+
+if __name__ == "__main__":
+    main()

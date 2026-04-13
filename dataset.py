@@ -6,8 +6,10 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
 
+PREPROCESSED_PIXEL_NORMALIZATION = "minus_one_to_one_from_grayscale_uint8"
+
 class EyebrowDataset(Dataset):
-    def __init__(self, csv_file, img_dir, transform=None, is_train=True):
+    def __init__(self, csv_file, img_dir, transform=None, is_train=True, preprocessed=False):
         """
         Args:
             csv_file (string): Path to the csv file with annotations.
@@ -15,12 +17,14 @@ class EyebrowDataset(Dataset):
             img_dir (string): Directory with all the images.
             transform (callable, optional): Optional transform to be applied on a sample.
             is_train (bool): If true, applies heavy data augmentation for training.
+            preprocessed (bool): If true, images are already cropped/aligned and should not be ROI-cropped again.
         """
         self.annotations = pd.read_csv(csv_file)
         self.img_dir = img_dir
         self.is_train = is_train
+        self.preprocessed = preprocessed
         
-        # Base transform: Normalizes the tensor
+        # Baballonia preprocessed captures and runtime both map grayscale uint8 into [-1, 1].
         self.base_transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5], std=[0.5])
@@ -53,11 +57,8 @@ class EyebrowDataset(Dataset):
         image = Image.open(img_name).convert('L')
         orig_w, orig_h = image.size
         
-        # Crop to Region of Interest
-        image = self.crop_roi(image)
-        crop_w, crop_h = image.size
-        crop_left = int(orig_w * 0.15)
-        crop_top = 0
+        if not self.preprocessed:
+            image = self.crop_roi(image)
 
         # Read labels
         if "brow" in self.annotations.columns and "inner" in self.annotations.columns and "outer" in self.annotations.columns:
