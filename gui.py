@@ -565,16 +565,19 @@ class TrainingThread(QThread):
 
             self.progress.emit(f"Using: {py}")
 
-            # Find train.py
+            # Find train.py — check exe dir, _internal, parent dirs
             train_script = None
-            for base in [Path(sys.executable).parent,
-                         Path(sys.executable).parent.parent,
-                         Path(sys.executable).parent.parent.parent]:
+            search = [Path(sys.executable).parent]
+            if hasattr(sys, '_MEIPASS'):
+                search.append(Path(sys._MEIPASS))
+            search.extend([Path(sys.executable).parent.parent,
+                           Path(sys.executable).parent.parent.parent])
+            for base in search:
                 if (base / 'train.py').exists():
                     train_script = str(base / 'train.py')
                     break
             if train_script is None:
-                self.progress.emit("Error: train.py not found. Place it next to gui.exe.")
+                self.progress.emit("Error: train.py not found. Place train.py, model.py, dataset.py next to the exe.")
                 self.finished.emit("")
                 return
 

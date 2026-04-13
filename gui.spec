@@ -36,6 +36,11 @@ for dll_name in ('onnxruntime.dll', 'onnxruntime_providers_shared.dll', 'DirectM
     if os.path.exists(dll_path):
         binaries.append((dll_path, '.'))
 
+# Bundle training scripts (used by external Python subprocess for baking)
+for script in ['train.py', 'model.py', 'dataset.py', 'onnx_inference.py', 'export_eyebrow_onnx.py']:
+    if os.path.exists(script):
+        datas.append((script, '.'))
+
 # Bundle the default ONNX model and version file
 if os.path.exists('eyebrow_model.onnx'):
     datas += [('eyebrow_model.onnx', '.'), ('eyebrow_model.onnx', '_internal')]
