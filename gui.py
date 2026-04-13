@@ -473,30 +473,97 @@ class CameraScanThread(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
-def _find_training_python():
-    """Find a Python with PyTorch installed."""
-    candidates = []
+TRAINING_ENV_DIR = Path(os.getenv("APPDATA", ".")) / "VREyebrowTracker" / "training_python"
+PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip"
+GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
+
+
+def _get_training_python():
+    """Find or return the training Python. Returns path or None."""
+    # Check bundled training env first
+    bundled = TRAINING_ENV_DIR / "python.exe"
+    if bundled.exists():
+        return str(bundled)
+    # Check venvs near exe/source
     for base in [Path(sys.executable).parent, Path(__file__).resolve().parent]:
-        for venv in ['venv_gpu', 'venv_cpu', 'venv']:
+        for venv in ['venv_gpu', 'venv_cpu']:
             p = base / venv / 'Scripts' / 'python.exe'
             if p.exists():
-                candidates.append(str(p))
+                return str(p)
         for parent in [base.parent, base.parent.parent]:
             for venv in ['venv_gpu', 'venv_cpu']:
                 p = parent / venv / 'Scripts' / 'python.exe'
                 if p.exists():
-                    candidates.append(str(p))
-    candidates.append('python')
-    for py in candidates:
-        try:
-            r = subprocess.run([py, '-c', 'import torch; print("ok")'],
-                               capture_output=True, text=True, timeout=15,
-                               creationflags=subprocess.CREATE_NO_WINDOW)
-            if r.returncode == 0 and 'ok' in r.stdout:
-                return py
-        except Exception:
-            continue
+                    return str(p)
     return None
+
+
+class TrainingSetupThread(QThread):
+    """Downloads and sets up Python embeddable + PyTorch for training."""
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool)
+
+    def run(self):
+        import zipfile
+        import urllib.request
+
+        env_dir = TRAINING_ENV_DIR
+        env_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # Step 1: Download Python embeddable
+            zip_path = env_dir / "python_embed.zip"
+            if not (env_dir / "python.exe").exists():
+                self.progress.emit("Downloading Python 3.10 embeddable (~12MB)...")
+                urllib.request.urlretrieve(PYTHON_EMBED_URL, str(zip_path))
+                self.progress.emit("Extracting Python...")
+                with zipfile.ZipFile(str(zip_path), 'r') as z:
+                    z.extractall(str(env_dir))
+                zip_path.unlink()
+
+                # Enable pip: uncomment 'import site' in python310._pth
+                pth_file = env_dir / "python310._pth"
+                if pth_file.exists():
+                    content = pth_file.read_text()
+                    content = content.replace("#import site", "import site")
+                    pth_file.write_text(content)
+
+            py = str(env_dir / "python.exe")
+
+            # Step 2: Install pip
+            if not (env_dir / "Scripts" / "pip.exe").exists():
+                self.progress.emit("Installing pip...")
+                getpip = env_dir / "get-pip.py"
+                urllib.request.urlretrieve(GET_PIP_URL, str(getpip))
+                subprocess.run([py, str(getpip), "--no-warn-script-location"],
+                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                getpip.unlink(missing_ok=True)
+
+            pip = str(env_dir / "Scripts" / "pip.exe")
+
+            # Step 3: Install PyTorch CPU + deps
+            self.progress.emit("Installing PyTorch CPU (~200MB, one-time)...")
+            subprocess.run([pip, "install", "torch", "--index-url",
+                           "https://download.pytorch.org/whl/cpu", "--no-warn-script-location"],
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+
+            self.progress.emit("Installing training dependencies...")
+            subprocess.run([pip, "install", "pandas", "tqdm", "onnx", "pillow", "--no-warn-script-location"],
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+
+            # Verify
+            r = subprocess.run([py, "-c", "import torch; print('ok')"],
+                              capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode == 0 and 'ok' in r.stdout:
+                self.progress.emit("Training environment ready!")
+                self.finished.emit(True)
+            else:
+                self.progress.emit("Error: PyTorch installation failed.")
+                self.finished.emit(False)
+
+        except Exception as e:
+            self.progress.emit(f"Setup error: {e}")
+            self.finished.emit(False)
 
 
 class TrainingThread(QThread):
@@ -529,7 +596,6 @@ class TrainingThread(QThread):
             from train import train_model
             ok = train_model(self.data_dir, self.train_csv, self.val_csv, save_path=save_path)
             if ok:
-                # Auto-export to ONNX and remove .pth
                 try:
                     from onnx_inference import export_pth_to_onnx
                     onnx_path = save_path.rsplit('.', 1)[0] + '.onnx'
@@ -550,22 +616,15 @@ class TrainingThread(QThread):
 
     def _run_external(self, save_path):
         try:
-            self.progress.emit("Searching for Python with PyTorch...")
-            py = _find_training_python()
+            py = _get_training_python()
             if py is None:
-                self.progress.emit(
-                    "Error: No Python with PyTorch found.\n"
-                    "Install a venv with PyTorch next to the exe folder:\n"
-                    "  python -m venv venv_gpu\n"
-                    "  venv_gpu\\Scripts\\pip install torch --index-url https://download.pytorch.org/whl/cu118\n"
-                    "  venv_gpu\\Scripts\\pip install pandas tqdm onnx"
-                )
+                self.progress.emit("Error: Training environment not set up. Click 'Setup Training' first.")
                 self.finished.emit("")
                 return
 
             self.progress.emit(f"Using: {py}")
 
-            # Find train.py — check exe dir, _internal, parent dirs
+            # Find train.py
             train_script = None
             search = [Path(sys.executable).parent]
             if hasattr(sys, '_MEIPASS'):
@@ -577,7 +636,7 @@ class TrainingThread(QThread):
                     train_script = str(base / 'train.py')
                     break
             if train_script is None:
-                self.progress.emit("Error: train.py not found. Place train.py, model.py, dataset.py next to the exe.")
+                self.progress.emit("Error: train.py not found.")
                 self.finished.emit("")
                 return
 
@@ -590,15 +649,13 @@ class TrainingThread(QThread):
                    f"ok=train_model({self.data_dir!r},{self.train_csv!r},{self.val_csv!r},save_path={save_path!r}); "
                    f"sys.exit(0 if ok else 1)"]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, bufsize=1,
-                                    creationflags=subprocess.CREATE_NO_WINDOW)
+                                    text=True, bufsize=1, creationflags=subprocess.CREATE_NO_WINDOW)
             for line in proc.stdout:
                 self.progress.emit(line.rstrip())
             proc.wait()
 
             if proc.returncode == 0:
                 self.progress.emit(f"Training Complete! {save_path}")
-                # Auto-export ONNX
                 onnx_path = save_path.rsplit('.', 1)[0] + '.onnx'
                 try:
                     subprocess.run([py, '-u', '-c',
@@ -606,11 +663,9 @@ class TrainingThread(QThread):
                         f"from onnx_inference import export_pth_to_onnx; "
                         f"export_pth_to_onnx({save_path!r},{onnx_path!r})"],
                         timeout=60, creationflags=subprocess.CREATE_NO_WINDOW)
-                    # Remove .pth now that .onnx exists
                     try:
-                        pth_file = onnx_path.rsplit('.', 1)[0] + '.pth'
-                        if os.path.exists(pth_file):
-                            os.remove(pth_file)
+                        if os.path.exists(save_path):
+                            os.remove(save_path)
                     except Exception:
                         pass
                     save_path = onnx_path
@@ -2026,29 +2081,30 @@ class VREyebrowTrackerGUI(QMainWindow):
         layout.addWidget(lbl_train)
 
         train_btn_row = QHBoxLayout()
+        # Setup button (one-time Python + PyTorch install)
+        self.btn_setup_training = QPushButton("Setup Training Environment")
+        self.btn_setup_training.setProperty("class", "primary-btn")
+        self.btn_setup_training.setToolTip("One-time download: Python + PyTorch (~300MB)")
+        self.btn_setup_training.clicked.connect(self._start_training_setup)
+        if _get_training_python() is not None:
+            self.btn_setup_training.setText("Training Environment Ready")
+            self.btn_setup_training.setEnabled(False)
+        layout.addWidget(self.btn_setup_training)
+
         self.btn_train = QPushButton("BAKE MODEL FROM CAPTURED DATA")
         self.btn_train.setObjectName("btn_bake_main")
         self.btn_train.setProperty("class", "primary-btn-purple")
-        self.btn_train.setToolTip(
-            "Train a model using the dataset captured in this app and save the best weights.\n"
-            "Requires PyTorch — use run.bat for training, not the built exe."
-        )
         self.btn_train.clicked.connect(self.start_training)
         train_btn_row.addWidget(self.btn_train)
 
         self.btn_train_with_path = QPushButton("BAKE FROM OTHER FOLDER")
         self.btn_train_with_path.setObjectName("btn_bake_with_path")
         self.btn_train_with_path.setProperty("class", "primary-btn")
-        self.btn_train_with_path.setToolTip(
-            "Train a model from a different dataset folder.\n"
-            "Requires PyTorch — use run.bat for training, not the built exe."
-        )
         self.btn_train_with_path.clicked.connect(self.start_training_with_path)
         train_btn_row.addWidget(self.btn_train_with_path)
 
-        
         layout.addLayout(train_btn_row)
-        
+
         self.lbl_train_status = QLabel("Status: Idle")
         layout.addWidget(self.lbl_train_status)
 
@@ -3072,6 +3128,32 @@ class VREyebrowTrackerGUI(QMainWindow):
             self._osc_fps = self._osc_frame_count / elapsed
             self._osc_frame_count = 0
             self._osc_fps_time = now
+
+    def _start_training_setup(self):
+        reply = QMessageBox.question(
+            self, "Setup Training Environment",
+            "This will download Python 3.10 + PyTorch CPU (~300MB).\n"
+            "This is a one-time setup for model baking.\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.btn_setup_training.setEnabled(False)
+        self.btn_setup_training.setText("Setting up...")
+        self._setup_thread = TrainingSetupThread()
+        self._setup_thread.progress.connect(lambda msg: print(f"[Setup] {msg}"))
+        self._setup_thread.progress.connect(self._update_train_status_smart)
+        self._setup_thread.finished.connect(self._training_setup_finished)
+        self._setup_thread.start()
+
+    def _training_setup_finished(self, success):
+        if success:
+            self.btn_setup_training.setText("Training Environment Ready")
+            self.lbl_train_status.setText("Status: Setup complete. You can now bake models.")
+        else:
+            self.btn_setup_training.setText("Setup Training Environment")
+            self.btn_setup_training.setEnabled(True)
+            self.lbl_train_status.setText("Status: Setup failed. Check console for details.")
 
     def start_training(self):
         if len(self.recorded_frames) < 10:
