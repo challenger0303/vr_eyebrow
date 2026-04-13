@@ -1525,12 +1525,42 @@ class VREyebrowTrackerGUI(QMainWindow):
             if os.path.exists(onnx_path):
                 return onnx_path
             print(f"Auto-converting {path} -> {onnx_path}")
-            try:
-                export_pth_to_onnx(path, onnx_path, batch_size=2, opset=17)
-            except Exception as e:
-                print(f"Failed to convert .pth to ONNX: {e}")
-                print("Tip: Use 'Bake Model' to train a new .onnx model, or load an existing .onnx file.")
+            if getattr(sys, 'frozen', False):
+                # Frozen build: use external Python with torch
+                py = _get_training_python()
+                if py is None:
+                    print("Cannot convert .pth: no Python with PyTorch found.")
+                    print("Run 'Setup Training Environment' first, or load an .onnx file.")
+                    return None
+                # Find export script
+                script_dir = None
+                search = [Path(sys.executable).parent]
+                if hasattr(sys, '_MEIPASS'):
+                    search.append(Path(sys._MEIPASS))
+                for base in search:
+                    if (base / 'export_eyebrow_onnx.py').exists():
+                        script_dir = str(base)
+                        break
+                if script_dir is None:
+                    print("export_eyebrow_onnx.py not found.")
+                    return None
+                r = subprocess.run([py, '-u', '-c',
+                    f"import sys; sys.path.insert(0,{script_dir!r}); "
+                    f"from export_eyebrow_onnx import export_onnx; "
+                    f"from pathlib import Path; "
+                    f"export_onnx(Path({path!r}), Path({onnx_path!r}), batch_size=2, opset=17)"],
+                    capture_output=True, text=True, timeout=60,
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+                if r.returncode == 0 and os.path.exists(onnx_path):
+                    return onnx_path
+                print(f"Failed to convert .pth: {r.stderr or r.stdout}")
                 return None
+            else:
+                try:
+                    export_pth_to_onnx(path, onnx_path, batch_size=2, opset=17)
+                except Exception as e:
+                    print(f"Failed to convert .pth to ONNX: {e}")
+                    return None
             return onnx_path
         return path
 
