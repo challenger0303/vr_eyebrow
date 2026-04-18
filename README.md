@@ -25,7 +25,17 @@ This will:
 3. Launch the GUI
 
 ### From Built Executable
-Download `VR Eyebrow Tracker.exe` from Releases and run it.
+Download the latest ZIP from Releases, extract it, and run **`Launch.bat`**.
+
+`Launch.bat` automatically installs the Visual C++ 2015-2022 Redistributable (x64) if it's missing, which is required by ONNX Runtime and PyQt5.
+
+If you run `VR Eyebrow Tracker.exe` directly and see errors like:
+- `DLL load failed while importing QtWidgets`
+- `DLL load failed while importing onnxruntime_pybind11_state`
+
+...run **`install_vc_redist.bat`** once, then try `Launch.bat` again.
+
+To remove all app data (training Python env, settings), run **`uninstall.bat`**.
 
 ## OSC Parameters
 
