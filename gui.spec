@@ -13,6 +13,10 @@ datas = []
 binaries = []
 hiddenimports = []
 
+# PyQt5 (ensure all Qt DLLs and plugins are bundled, including platforms/qwindows.dll)
+tmp_ret = collect_all('PyQt5')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
 # ONNX Runtime (DirectML GPU inference)
 tmp_ret = collect_all('onnxruntime')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
