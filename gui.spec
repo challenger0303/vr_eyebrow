@@ -33,6 +33,10 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('requests')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# OSCQuery (mDNS + HTTP advertisement)
+tmp_ret = collect_all('zeroconf')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
 # Copy onnxruntime DLLs to root level (DLL search path workaround)
 ort_capi = os.path.join(os.path.dirname(os.path.abspath('gui.py')), 'venv_gpu', 'Lib', 'site-packages', 'onnxruntime', 'capi')
 for dll_name in ('onnxruntime.dll', 'onnxruntime_providers_shared.dll', 'DirectML.dll'):
