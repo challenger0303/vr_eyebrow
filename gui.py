@@ -63,6 +63,7 @@ import json
 import struct
 from pythonosc.udp_client import SimpleUDPClient
 
+from oscquery import OscQueryPublisher, discover_vrchat_osc_target, zeroconf_available
 from onnx_inference import BrowNetONNX, HMDShiftTracker, get_available_providers, export_pth_to_onnx
 from inference import EMARegressor, PredictiveInterpolator
 from mjpeg_server import MjpegServer
@@ -872,7 +873,7 @@ class VREyebrowTrackerGUI(QMainWindow):
         
         # OSC State
         self.osc_client = None
-        self.osc_proxy = None
+        self._oscquery_publisher = None
         self.osc_enabled = False
         self.osc_ip = "127.0.0.1"
         self.osc_port = 9000
@@ -1430,6 +1431,10 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.txt_ip.setText(s["osc_ip"])
         if "osc_port" in s:
             self.txt_port.setText(str(s["osc_port"]))
+        if hasattr(self, "chk_osc_use_oscquery"):
+            self.chk_osc_use_oscquery.blockSignals(True)
+            self.chk_osc_use_oscquery.setChecked(bool(s.get("osc_use_oscquery", True)))
+            self.chk_osc_use_oscquery.blockSignals(False)
         if "smooth" in s:
             self.slider_smooth.setValue(int(s["smooth"]))
         if "sync" in s:
@@ -2356,6 +2361,12 @@ class VREyebrowTrackerGUI(QMainWindow):
         self.txt_port.textChanged.connect(lambda v: self._update_setting("osc_port", v))
         port_layout.addWidget(self.txt_port)
         grp_osc_layout.addLayout(port_layout)
+        self.chk_osc_use_oscquery = QCheckBox(
+            "Use OSCQuery (discover VRChat, advertise FT/v2 parameters via mDNS)"
+        )
+        self.chk_osc_use_oscquery.setChecked(bool(self.settings.get("osc_use_oscquery", True)))
+        self.chk_osc_use_oscquery.stateChanged.connect(self._on_osc_use_oscquery_changed)
+        grp_osc_layout.addWidget(self.chk_osc_use_oscquery)
         self.btn_osc = QPushButton("Start OSC Sender")
         self.btn_osc.setProperty("class", "success-btn")
         self.btn_osc.clicked.connect(self.toggle_osc)
@@ -2732,9 +2743,41 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.right_img_label.setText("Right Eye Stream")
         self._update_connection_state()
 
+    def _on_osc_use_oscquery_changed(self, state):
+        self._update_setting("osc_use_oscquery", state == Qt.Checked)
+
+    def _stop_oscquery_publisher(self):
+        pub = getattr(self, "_oscquery_publisher", None)
+        if pub is not None:
+            try:
+                pub.stop()
+            except Exception:
+                pass
+            self._oscquery_publisher = None
+
     def toggle_osc(self):
         if not self.osc_enabled:
-            # Connect
+            use_oq = (
+                self.chk_osc_use_oscquery.isChecked()
+                if hasattr(self, "chk_osc_use_oscquery")
+                else bool(self.settings.get("osc_use_oscquery", True))
+            )
+            use_oq_effective = use_oq
+            if use_oq and not zeroconf_available():
+                QMessageBox.warning(
+                    self,
+                    "OSCQuery",
+                    "The 'zeroconf' package is required for OSCQuery.\n"
+                    "Install with: pip install zeroconf\n\n"
+                    "Continuing with manual IP/Port only.",
+                )
+                use_oq_effective = False
+            if use_oq_effective:
+                discovered = discover_vrchat_osc_target()
+                if discovered:
+                    dip, dport = discovered
+                    self.txt_ip.setText(dip)
+                    self.txt_port.setText(str(dport))
             ip = self.txt_ip.text().strip()
             try:
                 port = int(self.txt_port.text())
@@ -2745,27 +2788,46 @@ class VREyebrowTrackerGUI(QMainWindow):
                 return
             try:
                 self.osc_client = SimpleUDPClient(ip, port)
-                
+
                 self.osc_enabled = True
+                if use_oq_effective:
+                    try:
+                        paths = [f"/avatar/parameters/FT/v2/{k}" for k in self.osc_param_all]
+                        self._oscquery_publisher = OscQueryPublisher(
+                            "VREyebrowTracker",
+                            paths,
+                            lambda: {k: float(self.osc_param_values.get(k, 0.0)) for k in self.osc_param_all},
+                        )
+                        self._oscquery_publisher.start()
+                    except Exception as e:
+                        QMessageBox.warning(
+                            self,
+                            "OSCQuery",
+                            f"UDP OSC started, but OSCQuery publish failed:\n{e}",
+                        )
                 for btn in (self.btn_osc, self.btn_osc_main):
                     btn.setText("Stop OSC Sender")
                     btn.setProperty("class", "danger-btn")
                     self._refresh_button_style(btn)
                 self.txt_ip.setEnabled(False)
                 self.txt_port.setEnabled(False)
+                if hasattr(self, "chk_osc_use_oscquery"):
+                    self.chk_osc_use_oscquery.setEnabled(False)
             except Exception as e:
                 QMessageBox.warning(self, "OSC Error", f"Could not create OSC client:\n{e}")
         else:
-            # Disconnect
             self.osc_enabled = False
             self.osc_client = None
-            
+            self._stop_oscquery_publisher()
+
             for btn in (self.btn_osc, self.btn_osc_main):
                 btn.setText("Start OSC Sender")
                 btn.setProperty("class", "success-btn")
                 self._refresh_button_style(btn)
             self.txt_ip.setEnabled(True)
             self.txt_port.setEnabled(True)
+            if hasattr(self, "chk_osc_use_oscquery"):
+                self.chk_osc_use_oscquery.setEnabled(True)
 
     def browse_weights(self):
         options = QFileDialog.Options()
@@ -3236,12 +3298,15 @@ class VREyebrowTrackerGUI(QMainWindow):
                     self._show_error_dialog("OSC Error", f"Failed to send OSC:\n{e}", key="osc_send")
                     self.osc_enabled = False
                     self.osc_client = None
+                    self._stop_oscquery_publisher()
                     for btn in (self.btn_osc, self.btn_osc_main):
                         btn.setText("Start OSC Sender")
                         btn.setProperty("class", "success-btn")
                         self._refresh_button_style(btn)
                     self.txt_ip.setEnabled(True)
                     self.txt_port.setEnabled(True)
+                    if hasattr(self, "chk_osc_use_oscquery"):
+                        self.chk_osc_use_oscquery.setEnabled(True)
             self._tick_osc_fps()
 
     def _tick_osc_fps(self):
@@ -3495,6 +3560,7 @@ class VREyebrowTrackerGUI(QMainWindow):
             self.cam_right = None
         if self.mjpeg_server.is_running:
             self.mjpeg_server.stop()
+        self._stop_oscquery_publisher()
         if hasattr(self, "_stdout"):
             sys.stdout = self._stdout
         if hasattr(self, "_stderr"):
